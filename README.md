@@ -36,6 +36,10 @@ All Halo and Ninja plumbing lives in [`lib/HaloCommon.ps1`](lib/HaloCommon.ps1),
 - **Retries:** Ticket creation retries transient errors (HTTP 5xx, 429, network) up to 3 times.
 - **Forks and pinned versions:** Set `$HaloLibUrl` before the loader line in a script to load the library from a fork or a tag.
 
+## Testing
+
+[`docs/Testing.md`](docs/Testing.md) describes how to trigger each monitor on a test device, including a helper script that simulates event log errors, a stopped service, a stuck print job and clock drift.
+
 ## Running from NinjaOne
 
 Create an automation (PowerShell, Windows, Run As: System) containing:
