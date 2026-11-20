@@ -3,15 +3,15 @@
 PowerShell monitoring scripts for NinjaOne that create and resolve tickets in Halo PSA.
 Each script is run on a schedule from a NinjaOne policy as SYSTEM.
 
-| Script | Purpose |
-|---|---|
-| `Invoke-DiskMaintenance.ps1` | Per-drive free-space check, cleanup, ticketing |
-| `Invoke-EventLogErrors.ps1` | Event log error monitor |
-| `Invoke-KMSMonitor.ps1` | KMS activation monitor |
-| `Invoke-MemoryMonitor.ps1` | Memory usage monitor |
-| `Invoke-NTPMonitor.ps1` | NTP drift monitor with resync attempt |
-| `Invoke-PrintQueueMonitor.ps1` | Stuck print queue monitor |
-| `Invoke-ServiceMonitor.ps1` | Service health monitor |
+| Script | Schedule | Purpose |
+|---|---|---|
+| [Invoke-DiskMaintenance](docs/Invoke-DiskMaintenance.md) | Every 6 hours | Checks free space per drive, runs cleanup, raises tickets |
+| [Invoke-EventLogErrors](docs/Invoke-EventLogErrors.md) | Hourly | Flags crashes, disk errors, conflicts and cleared audit logs |
+| [Invoke-KMSMonitor](docs/Invoke-KMSMonitor.md) | Daily | Checks Windows and Office activation, retries Windows activation |
+| [Invoke-MemoryMonitor](docs/Invoke-MemoryMonitor.md) | Every 15 minutes | Reports high memory use with the top processes |
+| [Invoke-NTPMonitor](docs/Invoke-NTPMonitor.md) | Daily | Checks clock drift and attempts a resync |
+| [Invoke-PrintQueueMonitor](docs/Invoke-PrintQueueMonitor.md) | Every 30 minutes | Clears stuck print jobs and restarts the Spooler |
+| [Invoke-ServiceMonitor](docs/Invoke-ServiceMonitor.md) | Every 15 minutes | Restarts stopped services and raises tickets if they stay down |
 
 ## Required NinjaOne custom fields (System scope, Automation = Read)
 
@@ -30,8 +30,10 @@ Each script's header lists any extra per-script fields.
 Create an automation (PowerShell, Windows, Run As: System) containing:
 
 ```powershell
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-NTPMonitor.ps1 | iex
+irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/<ScriptName>.ps1 | iex
 ```
+
+Replace `<ScriptName>` with one of the script names above, for example `Invoke-NTPMonitor`.
 
 Your endpoint controls (application control, network filtering) must allow PowerShell to reach `raw.githubusercontent.com`.
 
