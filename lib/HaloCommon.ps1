@@ -32,7 +32,8 @@
 # -----------------------------------------------------------------------
 function Get-NinjaConfig {
     param([string]$Name, $Default = "")
-    try { $v = Ninja-Property-Get $Name; if ($v) { return $v } } catch {}
+    # 2>$null: a missing field writes to the error stream (not catchable), which Ninja shows as noise
+    try { $v = Ninja-Property-Get $Name 2>$null; if ($v) { return $v } } catch {}
     return $Default
 }
 
@@ -40,7 +41,7 @@ $HaloBaseUrl      = (Get-NinjaConfig "halopsaurl" "https://yourtenant.halopsa.co
 $HaloAuthUrl      = "$HaloBaseUrl/auth/token"
 $HaloTenant       = ([uri]$HaloBaseUrl).Host.Split('.')[0]
 $HaloClientId     = Get-NinjaConfig "halopsaclientid" ""
-try { $HaloClientSecret = Ninja-Property-Get halopsasecret } catch { $HaloClientSecret = "" }
+try { $HaloClientSecret = Ninja-Property-Get halopsasecret 2>$null } catch { $HaloClientSecret = "" }
 $FallbackClientId = [int](Get-NinjaConfig "halopsafallbackclientid" 0)
 $FallbackSiteId   = [int](Get-NinjaConfig "halopsafallbacksiteid" 0)
 $HaloRmmFieldId   = [int](Get-NinjaConfig "halopsarmmcustomfieldid" 0)
@@ -102,7 +103,7 @@ function Get-NinjaDeviceId {
     $envMatches = Get-ChildItem Env: -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'ninja' }
     foreach ($e in $envMatches) { Write-DebugLog "  env: $($e.Name)=$($e.Value)" }
 
-    try { $fromField = Ninja-Property-Get ninjadeviceid } catch { $fromField = "" }
+    try { $fromField = Ninja-Property-Get ninjadeviceid 2>$null } catch { $fromField = "" }
     if ($fromField -and "$fromField".Trim() -match '^\d+$') {
         Write-DebugLog "Ninja device ID from custom field ninjadeviceid: $fromField"
         return "$fromField".Trim()
