@@ -22,8 +22,19 @@ Each script is run on a schedule from a NinjaOne policy as SYSTEM.
 | `halopsasecret` | Secure | Halo API client secret |
 | `halopsafallbackclientid` | Integer | Halo client ID used when no asset match is found |
 | `halopsafallbacksiteid` | Integer | Halo site ID used when no asset match is found |
+| `halopsarmmcustomfieldid` | Integer | Optional. Halo custom field ID that is set to `1` on created tickets (for example an "RMM selection" field). Blank = not set. |
+| `ninjadeviceid` | Integer | Optional. Improves asset matching (see below). |
 
 Each script's header lists any extra per-script fields.
+
+## Shared library and asset linking
+
+All Halo and Ninja plumbing lives in [`lib/HaloCommon.ps1`](lib/HaloCommon.ps1), which each script loads at runtime. A fix there reaches every monitor on its next run.
+
+- **Asset linking:** Every ticket is linked to the matching Halo asset. The device is matched on Ninja device ID when available, otherwise on exact hostname. If the match is ambiguous, or the hostname belongs to a different Ninja device, no asset is linked and the ticket falls back to the default client with the reason stated in the ticket.
+- **Fallback guard:** If `halopsafallbackclientid` or `halopsafallbacksiteid` is missing, a device with no asset match logs a warning and creates no ticket, instead of failing against Halo.
+- **Retries:** Ticket creation retries transient errors (HTTP 5xx, 429, network) up to 3 times.
+- **Forks and pinned versions:** Set `$HaloLibUrl` before the loader line in a script to load the library from a fork or a tag.
 
 ## Running from NinjaOne
 

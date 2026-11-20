@@ -30,6 +30,7 @@
         halopsasecret           - Secure  - Global - Halo API client secret
         halopsafallbackclientid - Integer - Global - Halo client ID used when no asset match is found
         halopsafallbacksiteid   - Integer - Global - Halo site ID used when no asset match is found
+        halopsarmmcustomfieldid - Integer - Global - Optional. Halo custom field ID set to 1 on created tickets (blank = omitted)
         memorythreshold        - Integer - alert threshold % (default 90 if blank; 0 = disabled)
         memorymonitorticket    - Text    - managed by script; do not edit manually
         memoryprocesscount     - Integer - top N processes to report (default 10 if blank)
@@ -42,23 +43,14 @@
 # -----------------------------------------------------------------------
 # HALO CONFIG
 # -----------------------------------------------------------------------
-# Instance-specific values are read from Ninja custom fields (Global scope, Scripts = Read)
-# so no tenant details live in this public script. See "Ninja Custom Fields required" above.
-function Get-NinjaConfig {
-    param([string]$Name, $Default = "")
-    try { $v = Ninja-Property-Get $Name; if ($v) { return $v } } catch {}
-    return $Default
-}
-$HaloBaseUrl      = (Get-NinjaConfig "halopsaurl" "https://yourtenant.halopsa.com").TrimEnd('/')
-$HaloAuthUrl      = "$HaloBaseUrl/auth/token"
-$HaloTenant       = ([uri]$HaloBaseUrl).Host.Split('.')[0]
-$HaloClientId     = Get-NinjaConfig "halopsaclientid" ""
-try { $HaloClientSecret = Ninja-Property-Get halopsasecret } catch { $HaloClientSecret = "" }
+# Shared Halo/Ninja helpers live in lib/HaloCommon.ps1 and are loaded at runtime.
+# Set $HaloLibUrl before this point to use a fork or a pinned tag instead of main.
+if (-not $HaloLibUrl) { $HaloLibUrl = "https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/lib/HaloCommon.ps1" }
+try { Invoke-Expression (Invoke-RestMethod -Uri $HaloLibUrl -UseBasicParsing -ErrorAction Stop) }
+catch { Write-Output "ERROR: could not load shared library from $HaloLibUrl - $($_.Exception.Message)"; exit 1 }
 $HaloAlertType    = 21    # Alerts board
 $HaloCategoryId   = "Monitoring & RMM>Monitoring Alert"
 $HaloImpactId     = 2     # Multiple Users
-$FallbackClientId = [int](Get-NinjaConfig "halopsafallbackclientid" 0)
-$FallbackSiteId   = [int](Get-NinjaConfig "halopsafallbacksiteid" 0)
 
 # -----------------------------------------------------------------------
 # MONITOR CONFIG
@@ -66,165 +58,6 @@ $FallbackSiteId   = [int](Get-NinjaConfig "halopsafallbacksiteid" 0)
 $DefaultThreshold    = 90    # % used before alerting
 $DefaultProcessCount = 10    # top N processes to report
 $HighProcessPct      = 20    # flag any single process consuming this % or more of total RAM
-
-# -----------------------------------------------------------------------
-# HALO FUNCTIONS
-# -----------------------------------------------------------------------
-function Get-HaloToken {
-    try {
-        $response = Invoke-RestMethod `
-            -Uri         $HaloAuthUrl `
-            -Method      POST `
-            -Headers     @{ "halo-tenant" = $HaloTenant } `
-            -Body        @{
-                grant_type    = "client_credentials"
-                client_id     = $HaloClientId
-                client_secret = $HaloClientSecret
-                scope         = "read:tickets edit:tickets read:customers read:assets"
-            } `
-            -ContentType "application/x-www-form-urlencoded" `
-            -ErrorAction Stop
-        return $response.access_token
-    } catch {
-        Write-Host "WARNING: Halo auth failed - $($_.Exception.Message)"
-        return $null
-    }
-}
-
-function Get-HaloClientSite {
-    param([string]$Token)
-    $fallback = @{ ClientId = $FallbackClientId; SiteId = $FallbackSiteId; Source = "fallback (default client)"; IsFallback = $true }
-    if (-not $Token) { return $fallback }
-    try {
-        $results = Invoke-RestMethod `
-            -Uri     "$HaloBaseUrl/api/asset?search=$env:COMPUTERNAME&count=10" `
-            -Headers @{ "Authorization" = "Bearer $Token" } `
-            -ErrorAction Stop
-        $asset = $results.assets | Where-Object { $_.inventory_number -eq $env:COMPUTERNAME } | Select-Object -First 1
-        if ($asset -and $asset.client_id -and $asset.site_id) {
-            return @{ ClientId = $asset.client_id; SiteId = $asset.site_id; Source = "Halo asset ($($asset.client_name) / $($asset.site_name))"; IsFallback = $false }
-        }
-    } catch {
-        Write-Host "WARNING: Asset lookup failed - $($_.Exception.Message). Using fallback."
-    }
-    return $fallback
-}
-
-function New-HaloTicket {
-    param(
-        [string]$Token,
-        [int]$ClientId,
-        [int]$SiteId,
-        [string]$Summary,
-        [string]$Details,
-        [int]$TicketType,
-        [int]$Priority = 3,
-        [int]$Status   = 1,
-        [int]$Urgency  = 2
-    )
-    if (-not $Token) { Write-Host "WARNING: No Halo token, skipping ticket creation."; return $null }
-
-    $ticket = @{
-        summary       = $Summary
-        details_html  = $Details
-        tickettype_id = $TicketType
-        client_id     = $ClientId
-        site_id       = $SiteId
-        category_1    = $HaloCategoryId
-        impact        = $HaloImpactId
-        urgency       = $Urgency
-        priority_id   = $Priority
-        status_id     = $Status
-        customfields  = @(
-            @{ id = 218; value = 1 }   # CFRMMSelectionForAutomation = NinjaOne
-        )
-    }
-    $body = "[" + ($ticket | ConvertTo-Json -Depth 5) + "]"
-
-    try {
-        $r = Invoke-WebRequest -UseBasicParsing `
-            -Uri     "$HaloBaseUrl/api/tickets" `
-            -Method  POST `
-            -Headers @{ "Authorization" = "Bearer $Token"; "Content-Type" = "application/json" } `
-            -Body    $body `
-            -ErrorAction SilentlyContinue
-
-        if ($r.StatusCode -in 200, 201) {
-            $created = $r.Content | ConvertFrom-Json
-            Write-Host "Halo ticket created: #$($created[0].id) - $($created[0].summary)"
-            return $created[0].id
-        } else {
-            Write-Host "WARNING: Halo ticket creation failed - $($r.Content)"
-            return $null
-        }
-    } catch {
-        Write-Host "WARNING: Halo ticket creation failed - $($_.Exception.Message)"
-        return $null
-    }
-}
-
-function Get-HaloTicketStatus {
-    param([string]$Token, [string]$TicketId)
-    if (-not $Token -or -not $TicketId) { return $null }
-    try {
-        $r = Invoke-RestMethod `
-            -Uri     "$HaloBaseUrl/api/tickets/$TicketId" `
-            -Headers @{ "Authorization" = "Bearer $Token" } `
-            -ErrorAction Stop
-        return $r.status_id
-    } catch {
-        Write-Host "WARNING: Could not query ticket #$TicketId - $($_.Exception.Message)"
-        return $null
-    }
-}
-
-function Close-HaloTicket {
-    param([string]$Token, [string]$TicketId)
-    if (-not $Token) { Write-Host "WARNING: No Halo token, skipping ticket close."; return }
-    $body = "[" + (@{ id = [int]$TicketId; status_id = 9 } | ConvertTo-Json -Depth 3) + "]"
-    try {
-        $r = Invoke-WebRequest -UseBasicParsing `
-            -Uri     "$HaloBaseUrl/api/tickets" `
-            -Method  POST `
-            -Headers @{ "Authorization" = "Bearer $Token"; "Content-Type" = "application/json" } `
-            -Body    $body `
-            -ErrorAction SilentlyContinue
-        if ($r.StatusCode -in 200, 201) {
-            Write-Host "Halo ticket #$TicketId closed."
-        } else {
-            Write-Host "WARNING: Could not close ticket #$TicketId - $($r.Content)"
-        }
-    } catch {
-        Write-Host "WARNING: Could not close ticket #$TicketId - $($_.Exception.Message)"
-    }
-}
-
-function Add-HaloTicketNote {
-    param([string]$Token, [string]$TicketId, [string]$Note)
-    if (-not $Token) { Write-Host "WARNING: No Halo token, skipping note."; return }
-    $action = @{
-        ticket_id        = [int]$TicketId
-        note             = $Note
-        hiddenfromclient = $true
-        outcome          = "none"
-    }
-    $body = "[" + ($action | ConvertTo-Json -Depth 5) + "]"
-    try {
-        $r = Invoke-WebRequest -UseBasicParsing `
-            -Uri     "$HaloBaseUrl/api/actions" `
-            -Method  POST `
-            -Headers @{ "Authorization" = "Bearer $Token"; "Content-Type" = "application/json" } `
-            -Body    $body `
-            -ErrorAction SilentlyContinue
-        if ($r.StatusCode -in 200, 201) {
-            Write-Host "Note added to Halo ticket #$TicketId"
-        } else {
-            Write-Host "WARNING: Could not add note to ticket #$TicketId - $($r.Content)"
-        }
-    } catch {
-        Write-Host "WARNING: Could not add note to ticket #$TicketId - $($_.Exception.Message)"
-    }
-}
 
 # -----------------------------------------------------------------------
 # MEMORY HELPERS
@@ -370,6 +203,7 @@ $clientWarning = if ($clientSite.IsFallback) {
 } else { "" }
 
 Write-Output "Halo          : $($clientSite.Source)"
+Write-Output "Halo Asset: $(if ($clientSite.AssetId) { "#$($clientSite.AssetId)" } else { 'none (ticket will not be linked to an asset)' })"
 Write-Output ""
 
 # -----------------------------------------------------------------------
@@ -455,6 +289,7 @@ $processTableHtml
             -Token      $haloToken `
             -ClientId   $clientSite.ClientId `
             -SiteId     $clientSite.SiteId `
+            -AssetId    $clientSite.AssetId `
             -Summary    "MEMORY ALERT | $env:COMPUTERNAME | $usedPct% used (threshold $threshold%)" `
             -Details    $ticketBody `
             -TicketType $HaloAlertType `
