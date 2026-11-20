@@ -30,6 +30,7 @@
         halopsafallbackclientid - Integer - Global - Halo client ID used when no asset match is found
         halopsafallbacksiteid   - Integer - Global - Halo site ID used when no asset match is found
         halopsarmmcustomfieldid - Integer - Global - Optional. Halo custom field ID set to 1 on created tickets (blank = omitted)
+        monitorhealth           - Text    - Device - Managed by the script: one OK/FAIL line per monitor. Alert on "|FAIL|" (multi-line text)
         printqueueticketid  - Text    - managed by script; do not edit manually
         printqueuethreshold - Integer - minutes before a job is considered stuck (default: 15)
 #>
@@ -41,9 +42,16 @@
 # -----------------------------------------------------------------------
 # Shared Halo/Ninja helpers live in lib/HaloCommon.ps1 and are loaded at runtime.
 # Set $HaloLibUrl before this point to use a fork or a pinned tag instead of main.
+$MonitorName = 'PrintQueue'
 if (-not $HaloLibUrl) { $HaloLibUrl = "https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/lib/HaloCommon.ps1" }
 try { Invoke-Expression (Invoke-RestMethod -Uri $HaloLibUrl -UseBasicParsing -ErrorAction Stop) }
-catch { Write-Output "ERROR: could not load shared library from $HaloLibUrl - $($_.Exception.Message)"; exit 1 }
+catch {
+    $loadErr = ($_.Exception.Message -replace '[\r\n"]', ' ')
+    Write-Output "ERROR: could not load shared library from $HaloLibUrl - $loadErr"
+    # Library not available, so report through the Windows event log (Ninja Windows Event condition: source NinjaMonitor, ID 905)
+    & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D "${MonitorName} on ${env:COMPUTERNAME}: could not load shared library - $loadErr" 2>&1 | Out-Null
+    exit 1
+}
 $HaloServiceType  = 1
 $HaloAlertType    = 21
 $HaloCategoryId   = "Monitoring & RMM>Monitoring Alert"
@@ -140,7 +148,7 @@ if ($stuckJobs.Count -eq 0) {
     Write-Output ""
     Write-Output "=== Print Queue Monitor Complete ==="
     Write-Output "Completed : $timestamp"
-    exit 0
+    Complete-Monitor
 }
 
 # -----------------------------------------------------------------------
@@ -338,4 +346,4 @@ Write-Output ""
 Write-Output "====================================================="
 Write-Output "=== Print Queue Monitor Complete ==="
 Write-Output "Completed : $timestamp"
-exit 0
+Complete-Monitor

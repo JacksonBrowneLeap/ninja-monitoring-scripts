@@ -19,6 +19,8 @@
                    so Invoke-NTPMonitor sees drift it cannot fix. Use -KeepTimeService to let the
                    monitor's resync succeed instead.
 
+      HealthFail   Adds a fake FAIL line to the monitorhealth field, to test the Ninja alert on it.
+
     Undo any mode with -Cleanup.
 
     Memory, Disk and KMS need no simulator: temporarily change the Ninja threshold fields
@@ -33,7 +35,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('EventLog','ServiceDown','PrintQueue','NtpSkew')][string]$Mode,
+    [Parameter(Mandatory)][ValidateSet('EventLog','ServiceDown','PrintQueue','NtpSkew','HealthFail')][string]$Mode,
     [Parameter(Mandatory)][switch]$ThisIsATestDevice,
     [switch]$Cleanup,
     [ValidateSet('Shutdown','Crash','Disk','Network','VSS')][string[]]$EventGroups = @('Shutdown','Crash','Disk','Network','VSS'),
@@ -127,6 +129,19 @@ switch ($Mode) {
     "Simulated stuck job" | Out-Printer -Name $name
     Write-Output "Paused printer $name with one queued job."
     Write-Output "Set 'printqueuethreshold' = 1, wait over a minute, then run Invoke-PrintQueueMonitor. Run -Cleanup afterwards."
+}
+
+'HealthFail' {
+    # Adds (or with -Cleanup removes) a fake FAIL line in the monitorhealth field, to test the Ninja
+    # "Custom fields" alert on "|FAIL|" without touching Halo or any real monitor.
+    $raw  = Ninja-Property-Get monitorhealth 2>$null
+    $keep = @()
+    if ($raw) { $keep = @("$raw" -split "\r?\n" | Where-Object { $_ -and ($_ -notlike 'SimulatedTest|*') }) }
+    if (-not $Cleanup) {
+        $keep += "SimulatedTest|FAIL|$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))|SIMULATED failure for alert testing"
+    }
+    Ninja-Property-Set monitorhealth (($keep | Sort-Object) -join "`n")
+    Write-Output $(if ($Cleanup) { "Removed the SimulatedTest line from monitorhealth." } else { "Added SimulatedTest|FAIL to monitorhealth. The Ninja alert should fire; run -Cleanup to clear it." })
 }
 
 'NtpSkew' {

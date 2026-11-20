@@ -56,6 +56,7 @@
         halopsafallbackclientid - Integer - Global - Halo client ID used when no asset match is found
         halopsafallbacksiteid   - Integer - Global - Halo site ID used when no asset match is found
         halopsarmmcustomfieldid - Integer - Global - Optional. Halo custom field ID set to 1 on created tickets (blank = omitted)
+        monitorhealth           - Text    - Device - Managed by the script: one OK/FAIL line per monitor. Alert on "|FAIL|" (multi-line text)
         DiskCleanupExcluded  - Checkbox  - tick to exclude device
         DiskThreshold_C      - Integer   - default 15 if not set
         DiskThreshold_D      - Integer   - default 15 if not set
@@ -73,9 +74,16 @@
 # -----------------------------------------------------------------------
 # Shared Halo/Ninja helpers live in lib/HaloCommon.ps1 and are loaded at runtime.
 # Set $HaloLibUrl before this point to use a fork or a pinned tag instead of main.
+$MonitorName = 'Disk'
 if (-not $HaloLibUrl) { $HaloLibUrl = "https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/lib/HaloCommon.ps1" }
 try { Invoke-Expression (Invoke-RestMethod -Uri $HaloLibUrl -UseBasicParsing -ErrorAction Stop) }
-catch { Write-Output "ERROR: could not load shared library from $HaloLibUrl - $($_.Exception.Message)"; exit 1 }
+catch {
+    $loadErr = ($_.Exception.Message -replace '[\r\n"]', ' ')
+    Write-Output "ERROR: could not load shared library from $HaloLibUrl - $loadErr"
+    # Library not available, so report through the Windows event log (Ninja Windows Event condition: source NinjaMonitor, ID 905)
+    & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D "${MonitorName} on ${env:COMPUTERNAME}: could not load shared library - $loadErr" 2>&1 | Out-Null
+    exit 1
+}
 $HaloAlertType      = 21    # Alerts board
 $HaloServiceType    = 1     # Service/Incident board
 $HaloCategoryId     = "Monitoring & RMM>Monitoring Alert"
@@ -330,7 +338,7 @@ try { $excluded = Ninja-Property-Get diskcleanupexcluded } catch { $excluded = "
 
 if ($excluded -eq "1") {
     Write-Output "DiskCleanupExcluded is set on this device - skipping all disk maintenance."
-    exit 0
+    Complete-Monitor
 }
 
 # -----------------------------------------------------------------------
@@ -626,4 +634,4 @@ if (-not $anyDriveActioned) {
 }
 Write-Output "=== Disk Maintenance Complete ==="
 Write-Output "Completed : $timestamp"
-exit 0
+Complete-Monitor
