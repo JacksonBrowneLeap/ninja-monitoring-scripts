@@ -1,0 +1,627 @@
+﻿#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Managed - Service Health Monitor
+    Scheduled via Ninja policy. Checks configured services, attempts restart if stopped,
+    and creates/resolves Halo PSA tickets based on outcome.
+
+.DESCRIPTION
+    - Reads monitored service names from Ninja custom field 'monitoredservices' (comma-separated)
+    - Reads open ticket map from Ninja custom field 'servicemonitortickets' (managed by script)
+    - For each service:
+        * Running + open ticket  → add resolved note + close ticket
+        * Running + no ticket    → silent OK
+        * Stopped → attempt restart, wait, recheck
+            - Now running + open ticket  → add restart note + close ticket
+            - Now running + no ticket    → closed Type 21 alert (FYI)
+            - Still stopped + open ticket → add re-check note
+            - Still stopped + no ticket   → new open Type 1 service ticket
+
+.NOTES
+    Version           : 1.4.0
+    Changelog         :
+        1.0.0 - Initial release
+        1.1.0 - Never-restart safety list (NTDS/EventLog/RpcSs); disabled-service skip;
+                transient-state guard; case-insensitive exclusion; flapping dedup
+                (restart-succeeded ticket now open, auto-closes next run); tamper-protected
+                service notes in ticket body (SentinelOne, Defender)
+        1.2.0 - Halo client secret moved to Ninja secure custom field (halopsasecret)
+        1.3.0 - Tamper-protected services no longer attempt restart; escalate directly like never-restart services
+        1.4.0 - Removed WinDefend from built-in list; disabled by design when SentinelOne is installed
+
+    Execution Context : System (run as SYSTEM / Local Admin)
+    Ninja Usage       : Policy > Scheduled Automation > Run As: System
+    Schedule          : Every 15 minutes
+    Safe to re-run    : Yes
+
+    Ninja Custom Fields required:
+        halopsaurl              - Text    - Global - Halo base URL, e.g. https://yourtenant.halopsa.com
+        halopsaclientid         - Text    - Global - Halo API application (client credentials) ID
+        halopsasecret           - Secure  - Global - Halo API client secret
+        halopsafallbackclientid - Integer - Global - Halo client ID used when no asset match is found
+        halopsafallbacksiteid   - Integer - Global - Halo site ID used when no asset match is found
+        monitoredservices     - Text  - comma-separated service names to monitor; leave blank for built-in list
+        servicemonitorexclude - Text  - comma-separated service names to skip on this device (case-insensitive)
+        servicemonitortickets - Text  - managed by script; do not edit manually
+#>
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# -----------------------------------------------------------------------
+# HALO CONFIG
+# -----------------------------------------------------------------------
+# Instance-specific values are read from Ninja custom fields (Global scope, Scripts = Read)
+# so no tenant details live in this public script. See "Ninja Custom Fields required" above.
+function Get-NinjaConfig {
+    param([string]$Name, $Default = "")
+    try { $v = Ninja-Property-Get $Name; if ($v) { return $v } } catch {}
+    return $Default
+}
+$HaloBaseUrl      = (Get-NinjaConfig "halopsaurl" "https://yourtenant.halopsa.com").TrimEnd('/')
+$HaloAuthUrl      = "$HaloBaseUrl/auth/token"
+$HaloTenant       = ([uri]$HaloBaseUrl).Host.Split('.')[0]
+$HaloClientId     = Get-NinjaConfig "halopsaclientid" ""
+try { $HaloClientSecret = Ninja-Property-Get halopsasecret } catch { $HaloClientSecret = "" }
+$HaloAlertType    = 21    # Alerts board
+$HaloServiceType  = 1     # Service/Incident board
+$HaloCategoryId   = "Monitoring & RMM>Monitoring Alert"
+$HaloImpactId     = 2     # Multiple Users
+$FallbackClientId = [int](Get-NinjaConfig "halopsafallbackclientid" 0)
+$FallbackSiteId   = [int](Get-NinjaConfig "halopsafallbacksiteid" 0)
+
+# -----------------------------------------------------------------------
+# SERVICE CONFIG
+# -----------------------------------------------------------------------
+$RestartWaitSec = 30    # seconds to wait after restart before rechecking
+
+# Services that must NEVER be auto-restarted — go straight to ticket.
+# NTDS: AD corruption risk on DCs. EventLog/RpcSs: OS-foundational.
+$NeverRestart = @("NTDS", "EventLog", "RpcSs")
+
+# Services where Start-Service may fail due to vendor tamper protection.
+# Ticket Next Steps will flag this so technicians know not to force-restart.
+$TamperProtected = @("SentinelAgent", "WinDefend", "MpsSvc")
+
+# Built-in default list — used when 'monitoredservices' Ninja field is empty.
+# Services not installed on the machine are silently skipped.
+$BuiltInServices = @(
+    # ── Core Windows ────────────────────────────────────────────────────
+    "EventLog"              # Windows Event Log          (always critical)
+    "Spooler"               # Print Spooler
+    "MpsSvc"                # Windows Firewall
+    "W32Time"               # Windows Time               (important on domain members)
+    "Dnscache"              # DNS Client
+
+    # ── Networking / File Services ───────────────────────────────────────
+    "LanmanServer"          # Server (SMB file/print sharing)
+    "LanmanWorkstation"     # Workstation
+    "Netlogon"              # Netlogon                   (domain members only)
+
+    # ── Remote Access ────────────────────────────────────────────────────
+    "TermService"           # Remote Desktop Services
+    "RpcSs"                 # Remote Procedure Call       (foundational; almost never stops, but catastrophic if it does)
+
+    # ── Server Roles (skipped silently if role not installed) ────────────
+    "DNS"                   # DNS Server
+    "NTDS"                  # Active Directory DS         (domain controllers only)
+    "DFSR"                  # DFS Replication
+    "DHCPServer"            # DHCP Server
+    "W3SVC"                 # IIS — World Wide Web Publishing
+    "WAS"                   # IIS — Windows Process Activation Service
+    "MSSQLSERVER"           # SQL Server (default instance)
+    "SQLSERVERAGENT"        # SQL Server Agent (default instance)
+    "MSSQL`$SQLEXPRESS"     # SQL Server Express named instance
+    "ReportServer"          # SQL Server Reporting Services
+
+    # ── Exchange On-Premises ─────────────────────────────────────────────
+    "MSExchangeIS"          # Exchange Information Store
+    "MSExchangeTransport"   # Exchange Hub Transport
+    "MSExchangeFrontEndTransport"
+
+    # ── Security / EDR ───────────────────────────────────────────────────
+    "SentinelAgent"         # SentinelOne EDR agent
+    "perch-winlogbeat"      # Perch Security — log shipper (SIEM)
+
+    # ── Endpoint Management ──────────────────────────────────────────────
+    "ImmyBot Agent"         # ImmyBot agent
+
+    # ── Backup / RMM Agents ──────────────────────────────────────────────
+    "NinjaRMMAgent"         # NinjaOne RMM agent
+    "VeeamBackupSvc"        # Veeam Backup Service
+    "VeeamTransportSvc"     # Veeam Transport Service
+    "VeeamDeploymentSvc"    # Veeam Deployment Service
+    "BackupExecAgentAccelerator"   # Veritas Backup Exec Agent
+    "BackupExecRPCService"         # Veritas Backup Exec RPC
+    "AcronisMMS"            # Acronis Managed Machine Service
+    "ShadowProtectSvc"      # StorageCraft ShadowProtect
+    "DattoAgent"            # Datto RMM Agent
+)
+
+# -----------------------------------------------------------------------
+# HALO FUNCTIONS
+# -----------------------------------------------------------------------
+function Get-HaloToken {
+    try {
+        $response = Invoke-RestMethod `
+            -Uri         $HaloAuthUrl `
+            -Method      POST `
+            -Headers     @{ "halo-tenant" = $HaloTenant } `
+            -Body        @{
+                grant_type    = "client_credentials"
+                client_id     = $HaloClientId
+                client_secret = $HaloClientSecret
+                scope         = "read:tickets edit:tickets read:customers read:assets"
+            } `
+            -ContentType "application/x-www-form-urlencoded" `
+            -ErrorAction Stop
+        return $response.access_token
+    } catch {
+        Write-Host "WARNING: Halo auth failed - $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Get-HaloClientSite {
+    param([string]$Token)
+    $fallback = @{ ClientId = $FallbackClientId; SiteId = $FallbackSiteId; Source = "fallback (default client)"; IsFallback = $true }
+    if (-not $Token) { return $fallback }
+    try {
+        $results = Invoke-RestMethod `
+            -Uri     "$HaloBaseUrl/api/asset?search=$env:COMPUTERNAME&count=10" `
+            -Headers @{ "Authorization" = "Bearer $Token" } `
+            -ErrorAction Stop
+        $asset = $results.assets | Where-Object { $_.inventory_number -eq $env:COMPUTERNAME } | Select-Object -First 1
+        if ($asset -and $asset.client_id -and $asset.site_id) {
+            return @{ ClientId = $asset.client_id; SiteId = $asset.site_id; Source = "Halo asset ($($asset.client_name) / $($asset.site_name))"; IsFallback = $false }
+        }
+    } catch {
+        Write-Host "WARNING: Asset lookup failed - $($_.Exception.Message). Using fallback."
+    }
+    return $fallback
+}
+
+function New-HaloTicket {
+    param(
+        [string]$Token,
+        [int]$ClientId,
+        [int]$SiteId,
+        [string]$Summary,
+        [string]$Details,
+        [int]$TicketType,
+        [int]$Priority = 3,
+        [int]$Status   = 1,
+        [int]$Urgency  = 2
+    )
+    if (-not $Token) { Write-Host "WARNING: No Halo token, skipping ticket creation."; return $null }
+
+    $ticket = @{
+        summary       = $Summary
+        details_html  = $Details
+        tickettype_id = $TicketType
+        client_id     = $ClientId
+        site_id       = $SiteId
+        category_1    = $HaloCategoryId
+        impact        = $HaloImpactId
+        urgency       = $Urgency
+        priority_id   = $Priority
+        status_id     = $Status
+        customfields  = @(
+            @{ id = 218; value = 1 }   # CFRMMSelectionForAutomation = NinjaOne
+        )
+    }
+    $body = "[" + ($ticket | ConvertTo-Json -Depth 5) + "]"
+
+    try {
+        $r = Invoke-WebRequest -UseBasicParsing `
+            -Uri     "$HaloBaseUrl/api/tickets" `
+            -Method  POST `
+            -Headers @{ "Authorization" = "Bearer $Token"; "Content-Type" = "application/json" } `
+            -Body    $body `
+            -ErrorAction SilentlyContinue
+
+        if ($r.StatusCode -eq 200 -or $r.StatusCode -eq 201) {
+            $created = $r.Content | ConvertFrom-Json
+            Write-Host "Halo ticket created: #$($created[0].id) - $($created[0].summary)"
+            return $created[0].id
+        } else {
+            Write-Host "WARNING: Halo ticket creation failed - $($r.Content)"
+            return $null
+        }
+    } catch {
+        Write-Host "WARNING: Halo ticket creation failed - $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Get-HaloTicketStatus {
+    param([string]$Token, [string]$TicketId)
+    if (-not $Token -or -not $TicketId) { return $null }
+    try {
+        $r = Invoke-RestMethod `
+            -Uri     "$HaloBaseUrl/api/tickets/$TicketId" `
+            -Headers @{ "Authorization" = "Bearer $Token" } `
+            -ErrorAction Stop
+        return $r.status_id
+    } catch {
+        Write-Host "WARNING: Could not query ticket #$TicketId - $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Close-HaloTicket {
+    param([string]$Token, [string]$TicketId)
+    if (-not $Token) { Write-Host "WARNING: No Halo token, skipping ticket close."; return }
+    $body = "[" + (@{ id = [int]$TicketId; status_id = 9 } | ConvertTo-Json -Depth 3) + "]"
+    try {
+        $r = Invoke-WebRequest -UseBasicParsing `
+            -Uri     "$HaloBaseUrl/api/tickets" `
+            -Method  POST `
+            -Headers @{ "Authorization" = "Bearer $Token"; "Content-Type" = "application/json" } `
+            -Body    $body `
+            -ErrorAction SilentlyContinue
+        if ($r.StatusCode -in 200, 201) {
+            Write-Host "Halo ticket #$TicketId closed."
+        } else {
+            Write-Host "WARNING: Could not close ticket #$TicketId - $($r.Content)"
+        }
+    } catch {
+        Write-Host "WARNING: Could not close ticket #$TicketId - $($_.Exception.Message)"
+    }
+}
+
+function Add-HaloTicketNote {
+    param([string]$Token, [string]$TicketId, [string]$Note)
+    if (-not $Token) { Write-Host "WARNING: No Halo token, skipping note."; return }
+    $action = @{
+        ticket_id        = [int]$TicketId
+        note             = $Note
+        hiddenfromclient = $true
+        outcome          = "none"
+    }
+    $body = "[" + ($action | ConvertTo-Json -Depth 5) + "]"
+    try {
+        $r = Invoke-WebRequest -UseBasicParsing `
+            -Uri     "$HaloBaseUrl/api/actions" `
+            -Method  POST `
+            -Headers @{ "Authorization" = "Bearer $Token"; "Content-Type" = "application/json" } `
+            -Body    $body `
+            -ErrorAction SilentlyContinue
+        if ($r.StatusCode -in 200, 201) {
+            Write-Host "Note added to Halo ticket #$TicketId"
+        } else {
+            Write-Host "WARNING: Could not add note to ticket #$TicketId - $($r.Content)"
+        }
+    } catch {
+        Write-Host "WARNING: Could not add note to ticket #$TicketId - $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------
+# TICKET MAP HELPERS
+# Stored format: "ServiceName=TicketId;ServiceName=TicketId"
+# -----------------------------------------------------------------------
+function Read-TicketMap {
+    param([string]$Raw)
+    $map = @{}
+    if (-not $Raw -or $Raw -eq "none") { return $map }
+    $Raw -split ";" | ForEach-Object {
+        $parts = $_ -split "=", 2
+        if ($parts.Count -eq 2 -and $parts[0].Trim() -ne "" -and $parts[1].Trim() -match '^\d+$') {
+            $map[$parts[0].Trim()] = [int]$parts[1].Trim()
+        }
+    }
+    return $map
+}
+
+function ConvertTo-TicketMapString {
+    param([hashtable]$Map)
+    if ($Map.Count -eq 0) { return "none" }
+    return ($Map.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ";"
+}
+
+# -----------------------------------------------------------------------
+# INIT
+# -----------------------------------------------------------------------
+$tzName    = [System.TimeZoneInfo]::Local.DisplayName
+$timestamp = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ($tzName)"
+$osInfo    = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+
+Write-Output "=== Service Health Monitor ==="
+Write-Output "Computer  : $env:COMPUTERNAME"
+Write-Output "OS        : $($osInfo.Caption)"
+Write-Output "Timestamp : $timestamp"
+Write-Output ""
+
+# -----------------------------------------------------------------------
+# READ NINJA FIELDS
+# -----------------------------------------------------------------------
+try { $monitoredServicesRaw = Ninja-Property-Get monitoredservices      } catch { $monitoredServicesRaw = "" }
+try { $ticketMapRaw         = Ninja-Property-Get servicemonitortickets  } catch { $ticketMapRaw = "" }
+try { $excludeRaw           = Ninja-Property-Get servicemonitorexclude  } catch { $excludeRaw = "" }
+
+$excludedServices = @(
+    $excludeRaw -split "," |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -ne "" }
+)
+
+$fieldServices = @(
+    $monitoredServicesRaw -split "," |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -ne "" }
+)
+
+if ($fieldServices.Count -gt 0) {
+    $serviceNames  = $fieldServices
+    $usingBuiltIn  = $false
+    Write-Output "Service list : field ($($serviceNames.Count) service(s)): $($serviceNames -join ', ')"
+} else {
+    $serviceNames  = $BuiltInServices | Select-Object -Unique
+    $usingBuiltIn  = $true
+    Write-Output "Service list : built-in default ($($serviceNames.Count) entries — not-installed services skipped silently)"
+}
+
+if ($excludedServices.Count -gt 0) {
+    Write-Output "Excluded     : $($excludedServices -join ', ')"
+    $excludedLower = $excludedServices | ForEach-Object { $_.ToLower() }
+    $serviceNames  = @($serviceNames | Where-Object { $_.ToLower() -notin $excludedLower })
+}
+
+$ticketMap = Read-TicketMap -Raw $ticketMapRaw
+
+# -----------------------------------------------------------------------
+# HALO AUTH + CLIENT LOOKUP
+# -----------------------------------------------------------------------
+$haloToken     = Get-HaloToken
+$haloTokenTime = Get-Date
+$clientSite    = Get-HaloClientSite -Token $haloToken
+$clientWarning = if ($clientSite.IsFallback) {
+    " - <b>WARNING:</b> Could not match device to Halo asset, defaulting to the fallback client. Verify correct client before actioning."
+} else { "" }
+
+Write-Output "Halo      : $($clientSite.Source)"
+Write-Output "====================================================="
+
+# -----------------------------------------------------------------------
+# SERVICE LOOP
+# -----------------------------------------------------------------------
+foreach ($svcName in $serviceNames) {
+
+    if (((Get-Date) - $haloTokenTime).TotalMinutes -gt 50) {
+        Write-Host "Refreshing Halo token (approaching expiry)..."
+        $refreshed = Get-HaloToken
+        if ($refreshed) { $haloToken = $refreshed; $haloTokenTime = Get-Date }
+    }
+
+    Write-Output ""
+    Write-Output "--- [$svcName] ---"
+
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        if ($usingBuiltIn) {
+            Write-Output "[$svcName] Not installed — skipping."
+        } else {
+            Write-Output "[$svcName] WARNING: Service not found on this machine — check the service name in 'monitoredservices' field."
+        }
+        continue
+    }
+
+    if ($svc.StartType -eq 'Disabled') {
+        Write-Output "[$svcName] Startup type is Disabled — skipping (intentionally disabled by administrator)."
+        continue
+    }
+
+    if ($svc.Status -notin @("Running", "Stopped")) {
+        Write-Output "[$svcName] Status is $($svc.Status) — skipping (transient state)."
+        continue
+    }
+
+    $existingTicketId = if ($ticketMap.ContainsKey($svcName)) { $ticketMap[$svcName] } else { $null }
+    $existingStatus   = if ($existingTicketId) { Get-HaloTicketStatus -Token $haloToken -TicketId $existingTicketId } else { $null }
+    $hasOpenTicket    = ($null -ne $existingStatus -and $existingStatus -notin @(9, 20))
+
+    Write-Output "[$svcName] Status: $($svc.Status)"
+
+    # ── CASE 1: Running ─────────────────────────────────────────────────
+    if ($svc.Status -eq "Running") {
+        if ($hasOpenTicket) {
+            Write-Output "[$svcName] Running — resolving open ticket #$existingTicketId."
+            $resolvedNote = @"
+<h4>Service Health — Now Running</h4>
+<table>
+<tr><td><b>Device</b></td><td>$env:COMPUTERNAME</td></tr>
+<tr><td><b>Service</b></td><td>$svcName</td></tr>
+<tr><td><b>Time</b></td><td>$timestamp</td></tr>
+</table>
+<p>Service is now running. No further action required.</p>
+<hr><p><i>Updated automatically by NinjaRMM automation.</i></p>
+"@ -replace ">[ \t\r\n]+<", "><"
+            Add-HaloTicketNote -Token $haloToken -TicketId $existingTicketId -Note $resolvedNote
+            Close-HaloTicket   -Token $haloToken -TicketId $existingTicketId
+            $ticketMap.Remove($svcName)
+        } else {
+            Write-Output "[$svcName] Running — no action required."
+        }
+        continue
+    }
+
+    # ── CASE 2: Stopped — attempt restart ───────────────────────────────
+    $restartError = $null
+
+    if ($svcName -in $NeverRestart -or $svcName -in $TamperProtected) {
+        $skipReason = if ($svcName -in $NeverRestart) { "never-restart list" } else { "tamper-protected list" }
+        Write-Output "[$svcName] In $skipReason — escalating directly without restart attempt."
+        $restartError = "never-restart"
+    } else {
+        Write-Output "[$svcName] Attempting restart..."
+        try {
+            Start-Service -Name $svcName -ErrorAction Stop
+        } catch {
+            $restartError = $_.Exception.Message
+            Write-Output "[$svcName] Restart command failed: $restartError"
+        }
+
+        if (-not $restartError) {
+            Start-Sleep -Seconds $RestartWaitSec
+        }
+        $svc.Refresh()
+        Write-Output "[$svcName] Post-restart status: $($svc.Status)"
+    }
+
+    # ── CASE 2a: Restart succeeded ───────────────────────────────────────
+    if ($svc.Status -eq "Running") {
+
+        if ($hasOpenTicket) {
+            Write-Output "[$svcName] Restarted OK — resolving open ticket #$existingTicketId."
+            $restartNote = @"
+<h4>Service Health — Restarted Successfully</h4>
+<table>
+<tr><td><b>Device</b></td><td>$env:COMPUTERNAME</td></tr>
+<tr><td><b>Service</b></td><td>$svcName</td></tr>
+<tr><td><b>Time</b></td><td>$timestamp</td></tr>
+<tr><td><b>Restart Attempted</b></td><td>Yes</td></tr>
+<tr><td><b>Restart Result</b></td><td>Success</td></tr>
+</table>
+<p>Service was found stopped and was restarted successfully. No further action required, but investigate root cause if this recurs.</p>
+<hr><p><i>Updated automatically by NinjaRMM automation.</i></p>
+"@ -replace ">[ \t\r\n]+<", "><"
+            Add-HaloTicketNote -Token $haloToken -TicketId $existingTicketId -Note $restartNote
+            Close-HaloTicket   -Token $haloToken -TicketId $existingTicketId
+            $ticketMap.Remove($svcName)
+
+        } else {
+            Write-Output "[$svcName] Restarted OK — creating alert ticket (auto-closes next run if still healthy)."
+            $alertBody = @"
+<h3>Service Stopped — Restarted Automatically</h3>
+<table>
+<tr><td><b>Device</b></td><td>$env:COMPUTERNAME</td></tr>
+<tr><td><b>Service</b></td><td>$svcName</td></tr>
+<tr><td><b>OS</b></td><td>$($osInfo.Caption)</td></tr>
+<tr><td><b>Client</b></td><td>$($clientSite.Source)$clientWarning</td></tr>
+<tr><td><b>Time</b></td><td>$timestamp</td></tr>
+<tr><td><b>Restart Attempted</b></td><td>Yes</td></tr>
+<tr><td><b>Restart Result</b></td><td>Success — service is running</td></tr>
+</table>
+<p>Service was detected as stopped and was restarted automatically. It is now running. This ticket will be closed automatically on the next scheduled check if the service remains healthy. If this recurs frequently, investigate the root cause.</p>
+<hr>
+<p><i>This ticket was created automatically by a NinjaRMM automation. No billable time was spent.</i></p>
+"@ -replace ">[ \t\r\n]+<", "><"
+            $newTicketId = New-HaloTicket `
+                -Token      $haloToken `
+                -ClientId   $clientSite.ClientId `
+                -SiteId     $clientSite.SiteId `
+                -Summary    "SERVICE ALERT | $env:COMPUTERNAME | $svcName — Stopped, auto-restarted" `
+                -Details    $alertBody `
+                -TicketType $HaloAlertType `
+                -Priority   4 `
+                -Status     1 `
+                -Urgency    3
+            if ($newTicketId) {
+                $ticketMap[$svcName] = $newTicketId
+            }
+        }
+        continue
+    }
+
+    # ── CASE 2b: Still stopped (or never-restart) ────────────────────────
+    $escalateMsg = if ($svcName -in $NeverRestart -or $svcName -in $TamperProtected) { "Never-restart/tamper-protected service — escalating directly." } else { "Still stopped after restart attempt — escalating." }
+    Write-Output "[$svcName] $escalateMsg"
+
+    $restartAttempted  = if ($svcName -in $NeverRestart) { "No (never-restart list)" } elseif ($svcName -in $TamperProtected) { "No (tamper-protected list)" } else { "Yes" }
+    $restartResultText = if ($svcName -in $NeverRestart) {
+        "Not attempted — this service is in the never-restart safety list"
+    } elseif ($svcName -in $TamperProtected) {
+        "Not attempted — this service is tamper-protected (security/EDR service)"
+    } elseif ($restartError) {
+        "Command failed: $restartError"
+    } else {
+        "Service did not start within $RestartWaitSec seconds"
+    }
+
+    if ($hasOpenTicket) {
+        Write-Output "[$svcName] Open ticket #$existingTicketId found — adding re-check note."
+        $recheckNote = @"
+<h4>Service Health Re-Check — Still Stopped</h4>
+<table>
+<tr><td><b>Device</b></td><td>$env:COMPUTERNAME</td></tr>
+<tr><td><b>Service</b></td><td>$svcName</td></tr>
+<tr><td><b>Time</b></td><td>$timestamp</td></tr>
+<tr><td><b>Restart Attempted</b></td><td>$restartAttempted</td></tr>
+<tr><td><b>Restart Result</b></td><td>$restartResultText</td></tr>
+</table>
+<p>Automated re-check ran. Service is still not running. Manual investigation still required.</p>
+<hr><p><i>Updated automatically by NinjaRMM automation.</i></p>
+"@ -replace ">[ \t\r\n]+<", "><"
+        Add-HaloTicketNote -Token $haloToken -TicketId $existingTicketId -Note $recheckNote
+
+    } else {
+        Write-Output "[$svcName] No open ticket — creating new service ticket."
+
+        $tamperNote = if ($svcName -in $TamperProtected) {
+            "<li><b>Note:</b> This is a protected security/EDR service. The restart failure may be due to tamper protection — do not attempt a forced restart. Check the vendor management console instead.</li>"
+        } else { "" }
+        $neverRestartNote = if ($svcName -in $NeverRestart) {
+            "<li><b>Note:</b> This service is in the never-restart safety list — no automated restart was attempted. Review current system state carefully before taking action.</li>"
+        } else { "" }
+        $headline    = if ($svcName -in $NeverRestart -or $svcName -in $TamperProtected) { "Service Stopped — Manual Action Required" } else { "Service Stopped — Restart Failed — Manual Action Required" }
+        $summaryText = if ($svcName -in $NeverRestart -or $svcName -in $TamperProtected) { "Stopped, no restart attempted" } else { "Stopped, restart failed" }
+
+        $serviceBody = @"
+<h3>$headline</h3>
+<table>
+<tr><td><b>Device</b></td><td>$env:COMPUTERNAME</td></tr>
+<tr><td><b>Service</b></td><td>$svcName</td></tr>
+<tr><td><b>OS</b></td><td>$($osInfo.Caption)</td></tr>
+<tr><td><b>Client</b></td><td>$($clientSite.Source)$clientWarning</td></tr>
+<tr><td><b>Time</b></td><td>$timestamp</td></tr>
+<tr><td><b>Restart Attempted</b></td><td>$restartAttempted</td></tr>
+<tr><td><b>Restart Result</b></td><td>$restartResultText</td></tr>
+</table>
+<h4>Next Steps</h4>
+<ul>
+$neverRestartNote
+$tamperNote
+<li>Check Windows Event Log (System / Application) for errors around the time of failure.</li>
+<li>Verify service dependencies are running: <code>sc qc "$svcName"</code></li>
+<li>Attempt manual restart: <code>Start-Service "$svcName"</code></li>
+<li>If the service runs under a specific account, verify the credentials are valid and the account is not locked.</li>
+<li>Review the service executable path and config files for corruption or misconfiguration.</li>
+</ul>
+<hr>
+<p><i>This ticket was created automatically by a NinjaRMM automation. Manual investigation required before closing.</i></p>
+"@ -replace ">[ \t\r\n]+<", "><"
+
+        $newTicketId = New-HaloTicket `
+            -Token      $haloToken `
+            -ClientId   $clientSite.ClientId `
+            -SiteId     $clientSite.SiteId `
+            -Summary    "SERVICE DOWN | $env:COMPUTERNAME | $svcName — $summaryText" `
+            -Details    $serviceBody `
+            -TicketType $HaloServiceType `
+            -Priority   2 `
+            -Status     1 `
+            -Urgency    1
+
+        if ($newTicketId) {
+            $ticketMap[$svcName] = $newTicketId
+        }
+    }
+}
+
+# -----------------------------------------------------------------------
+# WRITE TICKET MAP BACK TO NINJA
+# -----------------------------------------------------------------------
+$newMapStr = ConvertTo-TicketMapString -Map $ticketMap
+try {
+    Ninja-Property-Set servicemonitortickets $newMapStr
+    Write-Output ""
+    Write-Output "Ticket map saved: $newMapStr"
+} catch {
+    Write-Output "WARNING: Could not write servicemonitortickets field — ticket state not persisted"
+}
+
+Write-Output ""
+Write-Output "====================================================="
+Write-Output "=== Service Health Monitor Complete ==="
+Write-Output "Completed : $timestamp"
+exit 0
