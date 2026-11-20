@@ -79,11 +79,13 @@ function Complete-Monitor {
     exit 0
 }
 
-$HaloBaseUrl      = (Get-NinjaConfig "halopsaurl" "https://yourtenant.halopsa.com").TrimEnd('/')
+# $HaloBaseUrlOverride (set before the script runs) replaces the Ninja field; used to test failure alerting.
+$HaloBaseUrl      = $(if ($HaloBaseUrlOverride) { $HaloBaseUrlOverride } else { Get-NinjaConfig "halopsaurl" "https://yourtenant.halopsa.com" }).TrimEnd('/')
 $HaloAuthUrl      = "$HaloBaseUrl/auth/token"
 $HaloTenant       = ([uri]$HaloBaseUrl).Host.Split('.')[0]
-$HaloClientId     = Get-NinjaConfig "halopsaclientid" ""
+$HaloClientId     = $(if ($HaloClientIdOverride) { $HaloClientIdOverride } else { Get-NinjaConfig "halopsaclientid" "" })
 try { $HaloClientSecret = Ninja-Property-Get halopsasecret 2>$null } catch { $HaloClientSecret = "" }
+if ($HaloClientSecretOverride) { $HaloClientSecret = $HaloClientSecretOverride }   # test hook: simulate a wrong API key
 $FallbackClientId = [int](Get-NinjaConfig "halopsafallbackclientid" 0)
 $FallbackSiteId   = [int](Get-NinjaConfig "halopsafallbacksiteid" 0)
 $HaloRmmFieldId   = [int](Get-NinjaConfig "halopsarmmcustomfieldid" 0)
@@ -94,8 +96,9 @@ if ($FallbackClientId -le 0 -or $FallbackSiteId -le 0) {
     Write-Host "WARNING: halopsafallbackclientid / halopsafallbacksiteid are not set. Devices with no matching Halo asset will NOT get a ticket."
 }
 
-if ($PSVersionTable.PSVersion -lt [version]'5.1') {
-    Register-MonitorFailure "PowerShell $($PSVersionTable.PSVersion) is older than 5.1"
+$MinPS = if ($MinPSVersionOverride) { [version]$MinPSVersionOverride } else { [version]'5.1' }   # override is a test hook
+if ($PSVersionTable.PSVersion -lt $MinPS) {
+    Register-MonitorFailure "PowerShell $($PSVersionTable.PSVersion) is older than $MinPS"
     Complete-Monitor
 }
 if (-not $HaloClientId -or -not $HaloClientSecret -or $HaloBaseUrl -like '*yourtenant*') {

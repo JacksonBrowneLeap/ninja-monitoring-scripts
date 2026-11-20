@@ -13,25 +13,29 @@ rem   ID 903  GitHub unreachable (shared library cannot be downloaded)
 rem   ID 904  Halo unreachable (URL read from the halopsaurl Ninja field)
 rem
 rem Test the alert path without breaking anything:  Test-MonitorCanary.bat simulate 903
+rem Real-failure tests: set any of these before the checks run (see docs/Alerting.md):
+rem   GITHUB_URL (bad URL -> 903), HALO_URL_OVERRIDE (bad URL -> 904), MIN_PS=99.0 (-> 902), PS_EXE=missing.exe (-> 901)
 rem Exit code: 0 = all checks passed, 1 = at least one failed.
 rem ===========================================================================
 
 set "SRC=NinjaMonitor"
-set "GITHUB_URL=https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/lib/HaloCommon.ps1"
+if not defined GITHUB_URL set "GITHUB_URL=https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/lib/HaloCommon.ps1"
+if not defined PS_EXE set "PS_EXE=powershell.exe"
+if not defined MIN_PS set "MIN_PS=5.1"
 set "CLI=%ProgramData%\NinjaRMMAgent\ninjarmm-cli.exe"
 set "FAILS=0"
 
 if /i "%~1"=="simulate" goto :simulate
 
 rem --- 1) PowerShell runs and is 5.1 or newer -------------------------------
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if ($PSVersionTable.PSVersion -lt [version]'5.1') { exit 3 } else { exit 0 }" >nul 2>&1
+"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "if ($PSVersionTable.PSVersion -lt [version]'%MIN_PS%') { exit 42 } else { exit 0 }" >nul 2>&1
 set "PSRC=!errorlevel!"
 if "!PSRC!"=="0" goto :ps_ok
-if "!PSRC!"=="3" goto :ps_old
+if "!PSRC!"=="42" goto :ps_old
 call :fail 901 "PowerShell failed to run (exit code !PSRC!) - missing, broken or blocked"
 goto :ps_done
 :ps_old
-call :fail 902 "PowerShell is older than 5.1"
+call :fail 902 "PowerShell is older than %MIN_PS%"
 goto :ps_done
 :ps_ok
 echo OK: PowerShell 5.1 or newer runs.
@@ -51,6 +55,7 @@ echo OK: GitHub reachable.
 
 set "HALO_URL="
 if exist "%CLI%" for /f "usebackq delims=" %%u in (`"%CLI%" get halopsaurl 2^>nul`) do set "HALO_URL=%%u"
+if defined HALO_URL_OVERRIDE set "HALO_URL=%HALO_URL_OVERRIDE%"
 if not defined HALO_URL goto :halo_skip
 if "!HALO_URL:~-1!"=="/" set "HALO_URL=!HALO_URL:~0,-1!"
 call :http "!HALO_URL!/auth/token"

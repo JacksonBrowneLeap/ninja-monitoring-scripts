@@ -71,6 +71,46 @@ Use a test device. Run from a Ninja automation (PowerShell, Windows, System):
 - For the **Windows Event** alert, run the canary as a Batch automation with the argument `simulate 903`. A matching event is written and the alert should fire.
 - A real end-to-end failure: on a test device, run a monitor whose Halo secret is wrong (for example in a test copy), or block `raw.githubusercontent.com` for that device and watch for ID 903 or 905.
 
+## Test with real failures (no fake data)
+
+Every layer-1 failure can be triggered for real on a test device by setting a test override before a monitor runs. The monitor behaves exactly as it would in production: it hits the failure, writes `FAIL` to `monitorhealth` and exits 1. Run these from a PowerShell automation (Run As System). While the `alerting` branch is unmerged, point the monitor and library at the same ref; after the merge use `main` and drop the `$HaloLibUrl` line.
+
+Common start for every layer-1 test:
+
+```powershell
+$HaloLibUrl = "https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/alerting/lib/HaloCommon.ps1"
+```
+
+Then add ONE override line from the table, and finish with the monitor launcher:
+
+```powershell
+irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/alerting/Invoke-NTPMonitor.ps1 | iex
+```
+
+| Failure to test | Line to add before the launcher | Expected |
+|---|---|---|
+| Halo not reachable | `$HaloBaseUrlOverride = "https://halo-unreachable.invalid"` | `NTP\|FAIL\|...Halo auth failed`, exit 1 |
+| API key incorrect | `$HaloClientSecretOverride = "wrong-secret"` | `NTP\|FAIL\|...Halo auth failed` (401), exit 1 |
+| Wrong client ID | `$HaloClientIdOverride = "00000000-0000-0000-0000-000000000000"` | `NTP\|FAIL\|...Halo auth failed`, exit 1 |
+| PowerShell version too old | `$MinPSVersionOverride = "99.0"` | `NTP\|FAIL\|PowerShell 5.x is older than 99.0`, exit 1 |
+| Halo URL/credentials missing | (not an override: test in a copy of the test device with the field blank, or use the API key tests) | `Halo URL, client ID or secret not configured` |
+| Library cannot load | change the `$HaloLibUrl` line to `.../lib/DoesNotExist.ps1` | Event 905 from source `NinjaMonitor`, exit 1 |
+
+Run the same launcher again without any override. The monitor writes `NTP|OK|...` and the alert clears.
+
+### Real failures for the canary
+
+Layer 2 reads these environment variables, so a test copy of the canary automation only needs one extra line at the very top (then delete the copy):
+
+| Failure to test | Line to add at the top of the test copy | Expected event |
+|---|---|---|
+| PowerShell blocked or missing | `set "PS_EXE=C:\missing\powershell.exe"` | 901 |
+| PowerShell too old | `set "MIN_PS=99.0"` | 902 |
+| GitHub unreachable | `set "GITHUB_URL=https://raw.githubusercontent.com/does-not-exist/x/main/y"` | 903 |
+| Halo unreachable | `set "HALO_URL_OVERRIDE=https://halo-unreachable.invalid"` | 904 |
+
+`simulate <ID>` writes the event directly if you only want to test the alert, not the check.
+
 ## What this cannot catch
 
 - A device that is off, or whose Ninja agent is offline: use Ninja's own offline alert.
