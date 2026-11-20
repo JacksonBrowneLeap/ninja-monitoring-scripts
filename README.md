@@ -30,7 +30,7 @@ Each script's header lists any extra per-script fields.
 Create an automation (PowerShell, Windows, Run As: System) containing:
 
 ```powershell
-irm https://raw.githubusercontent.com/<owner>/ninja-monitoring-scripts/main/Invoke-NTPMonitor.ps1 | iex
+irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-NTPMonitor.ps1 | iex
 ```
 
 Your endpoint controls (application control, network filtering) must allow PowerShell to reach `raw.githubusercontent.com`.
