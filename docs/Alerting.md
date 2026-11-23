@@ -18,7 +18,8 @@ The canary also covers the cases where a monitor never gets as far as writing it
 | A syntax error pushed to the repo (monitor never starts) | Canary 906, and the CI check blocks it before merge |
 | A monitor hangs, is killed, is not scheduled, or its automation was removed | Canary 908 (no report within max(3 x schedule, 1 hour)) |
 | The `monitorhealth` field cannot be written (field missing, wrong type, no permission) | Canary 907, raised by the monitor itself; the write is read back to prove it stuck |
-| Two monitors finishing at the same time | A machine-wide lock around the read-and-write stops one from overwriting the other's line |
+| Two monitors finishing at the same time | A machine-wide lock covers the read, the write and a short wait until the write is visible, so a later monitor cannot overwrite a line from a stale read |
+| Many monitors starting in the same minute (the Ninja agent then returns "Unable to fill operation type") | Each monitor waits a random 0-40 s before starting, and the library retries that one error. A monitor never writes the field after a failed read (that would wipe the other monitors' lines) |
 
 ## Layer 1: script health
 

@@ -30,10 +30,45 @@
 # -----------------------------------------------------------------------
 # CONFIG
 # -----------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# NINJA AGENT RESILIENCE
+# The Ninja agent intermittently fails property calls with "Unable to fill operation type", mostly when
+# several monitors hit it in the same moment (15-minute, 30-minute and hourly monitors all start together
+# at the top of the hour). Two defences:
+#   1. A random 0-40s start delay so the monitors do not all arrive at once.
+#      Set $NoStartJitter = $true before loading this file to skip it (tests, manual runs).
+#   2. Invoke-NinjaCall: used by THIS library only (config reads, the Halo secret, the monitorhealth field).
+#      It retries that one transient error with a short back-off. Any other error, such as an optional
+#      field that does not exist, is not retried. It does not replace or shadow Ninja-Property-Get/Set,
+#      so the monitors' own calls behave exactly as before.
+# -----------------------------------------------------------------------
+if (-not $NoStartJitter) { Start-Sleep -Seconds (Get-Random -Minimum 0 -Maximum 40) }
+
+function Invoke-NinjaCall {
+    # Returns @{ Ok = $true/$false; Value = ... }. Ok is $false if the call still errored after the retries.
+    param([ValidateSet('Get', 'Set')][string]$Op, [string]$Field, [string]$Value)
+    $maxAttempts = 4
+    for ($i = 1; $i -le $maxAttempts; $i++) {
+        $err = $null; $out = $null; $thrown = $null
+        try {
+            if ($Op -eq 'Get') { $out = Ninja-Property-Get $Field -ErrorAction SilentlyContinue -ErrorVariable err }
+            else               { $out = Ninja-Property-Set $Field $Value -ErrorAction SilentlyContinue -ErrorVariable err }
+        } catch { $thrown = $_ }
+        $messages = @(@($err) + @($thrown) | Where-Object { $_ } | ForEach-Object { "$_" })
+        if ($messages.Count -eq 0) { return @{ Ok = $true; Value = $out } }
+        $transient = @($messages | Where-Object { $_ -match 'Unable to fill operation type' }).Count -gt 0
+        if ($transient -and $i -lt $maxAttempts) {
+            Start-Sleep -Seconds ((2 * $i) + (Get-Random -Minimum 0 -Maximum 3))
+            continue
+        }
+        return @{ Ok = $false; Value = $out }
+    }
+}
+
 function Get-NinjaConfig {
     param([string]$Name, $Default = "")
-    # 2>$null: a missing field writes to the error stream (not catchable), which Ninja shows as noise
-    try { $v = Ninja-Property-Get $Name 2>$null; if ($v) { return $v } } catch {}
+    # Errors for a missing field are not catchable and show as noise in Ninja, hence the helper (which swallows them).
+    try { $r = Invoke-NinjaCall -Op Get -Field $Name; if ($r.Ok -and $r.Value) { return $r.Value } } catch {}
     return $Default
 }
 
@@ -70,35 +105,61 @@ function ConvertFrom-MonitorHealth {
 function Set-MonitorHealth {
     # One line per monitor in the 'monitorhealth' field: Name|STATUS|UTC time|message
     # Returns $true only when the new line was written AND read back from Ninja, else $false.
+    #
+    # Design notes (each one was a real failure seen on a device):
+    #  - The machine-wide lock covers read-merge-write AND a short, bounded wait (about 12s) until the write is
+    #    visible on read-back. Releasing earlier lets the next monitor read a stale copy and overwrite this line
+    #    (seen in testing: a monitor confirmed OK, then its line vanished). Retries and back-off sleeps stay
+    #    OUTSIDE the lock, so one slow or failing holder cannot queue everyone else for long.
+    #  - Never write without the lock, and never write after a failed read: a failed read looks like an empty
+    #    field and would wipe every other monitor's line.
+    #  - Reads can lag behind writes, so the read-back polls before declaring failure, and a failed attempt is
+    #    simply repeated (the merge keeps whatever is there).
     param([string]$Status, [string]$Message = "")
     if (-not $MonitorName) { return $true }
     $msg = ($Message -replace '[\r\n|]', ' ')
     if ($msg.Length -gt 120) { $msg = $msg.Substring(0, 120) }
-    $mutex = $null; $locked = $false; $ok = $false
+    $mutex = $null; $ok = $false
     try {
-        # Several monitors share this one field and some run on the same schedule. Without a lock the
-        # read-modify-write below can lose an update (including a FAIL), so serialise it machine-wide.
         $mutex = New-Object System.Threading.Mutex($false, 'Global\NinjaMonitorHealth')
-        try { $locked = $mutex.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $locked = $true }
-        if (-not $locked) { Write-Host "WARNING: Timed out waiting for the monitorhealth lock - writing anyway." }
         for ($attempt = 1; ($attempt -le 3) -and (-not $ok); $attempt++) {
-            $raw   = Ninja-Property-Get monitorhealth 2>$null
-            $lines = @(ConvertFrom-MonitorHealth "$raw" | Where-Object { $_.Name -ne $MonitorName } |
-                       ForEach-Object { "{0}|{1}|{2}|{3}" -f $_.Name, $_.Status, $_.Time, $_.Message })
             $stamp   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
             $newLine = ("{0}|{1}|{2}|{3}" -f $MonitorName, $Status, $stamp, $msg)
-            $lines  += $newLine
-            [void](Ninja-Property-Set monitorhealth (($lines | Sort-Object) -join "`n") 2>$null)
-            # Read back: Ninja-Property-Set errors are not catchable, so verify the value actually stuck.
-            $check = Ninja-Property-Get monitorhealth 2>$null
-            if (@(ConvertFrom-MonitorHealth "$check" | Where-Object { $_.Name -eq $MonitorName -and $_.Status -eq $Status -and $_.Time -eq $stamp }).Count -ge 1) { $ok = $true }
-            elseif ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+            $locked = $false
+            try {
+                try { $locked = $mutex.WaitOne(150000) } catch [System.Threading.AbandonedMutexException] { $locked = $true }
+                if (-not $locked) {
+                    Write-Host "WARNING: Timed out waiting for the monitorhealth lock (attempt $attempt) - not writing without it."
+                } else {
+                    $read = Invoke-NinjaCall -Op Get -Field monitorhealth
+                    if (-not $read.Ok) {
+                        Write-Host "WARNING: Could not read monitorhealth (attempt $attempt) - not writing, so other monitors' lines are not wiped."
+                    } else {
+                        $lines = @(ConvertFrom-MonitorHealth "$($read.Value)" | Where-Object { $_.Name -ne $MonitorName } |
+                                   ForEach-Object { "{0}|{1}|{2}|{3}" -f $_.Name, $_.Status, $_.Time, $_.Message })
+                        $lines += $newLine
+                        $set = Invoke-NinjaCall -Op Set -Field monitorhealth -Value (($lines | Sort-Object) -join "`n")
+                        if (-not $set.Ok) {
+                            Write-Host "WARNING: Ninja rejected the monitorhealth write (attempt $attempt)."
+                        } else {
+                            # Read-back, still holding the lock: Ninja-Property-Set errors are not catchable and reads can lag.
+                            foreach ($pause in 1, 2, 3, 3, 3) {
+                                Start-Sleep -Seconds $pause
+                                $check = Invoke-NinjaCall -Op Get -Field monitorhealth
+                                if ($check.Ok -and @(ConvertFrom-MonitorHealth "$($check.Value)" | Where-Object { $_.Name -eq $MonitorName -and $_.Status -eq $Status -and $_.Time -eq $stamp }).Count -ge 1) { $ok = $true; break }
+                            }
+                        }
+                    }
+                }
+            } finally {
+                if ($locked) { try { $mutex.ReleaseMutex() } catch {} }
+            }
+            if ((-not $ok) -and ($attempt -lt 3)) { Start-Sleep -Seconds (Get-Random -Minimum 2 -Maximum 8) }
         }
     } catch {
         Write-Host "WARNING: Could not update monitorhealth - $($_.Exception.Message)"
     } finally {
-        if ($locked) { try { $mutex.ReleaseMutex() } catch {} }
-        if ($mutex)  { $mutex.Dispose() }
+        if ($mutex) { $mutex.Dispose() }
     }
     if (-not $ok) { Write-Host "WARNING: monitorhealth could not be written or verified." }
     return [bool]$ok
@@ -138,7 +199,8 @@ $HaloBaseUrl      = $(if ($HaloBaseUrlOverride) { $HaloBaseUrlOverride } else { 
 $HaloAuthUrl      = "$HaloBaseUrl/auth/token"
 $HaloTenant       = ([uri]$HaloBaseUrl).Host.Split('.')[0]
 $HaloClientId     = $(if ($HaloClientIdOverride) { $HaloClientIdOverride } else { Get-NinjaConfig "halopsaclientid" "" })
-try { $HaloClientSecret = Ninja-Property-Get halopsasecret 2>$null } catch { $HaloClientSecret = "" }
+$secretRead = Invoke-NinjaCall -Op Get -Field halopsasecret
+$HaloClientSecret = if ($secretRead.Ok) { $secretRead.Value } else { "" }
 if ($HaloClientSecretOverride) { $HaloClientSecret = $HaloClientSecretOverride }   # test hook: simulate a wrong API key
 $FallbackClientId = [int](Get-NinjaConfig "halopsafallbackclientid" 0)
 $FallbackSiteId   = [int](Get-NinjaConfig "halopsafallbacksiteid" 0)
