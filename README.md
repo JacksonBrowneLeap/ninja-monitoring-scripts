@@ -36,6 +36,10 @@ All Halo and Ninja plumbing lives in [`lib/HaloCommon.ps1`](lib/HaloCommon.ps1),
 - **Retries:** Ticket creation retries transient errors (HTTP 5xx, 429, network) up to 3 times.
 - **Forks and pinned versions:** Set `$HaloLibUrl` before the loader line in a script to load the library from a fork or a tag.
 
+## Alerting on monitor failures
+
+[`docs/Alerting.md`](docs/Alerting.md) explains how to get a NinjaOne alert when the monitoring itself fails (wrong PowerShell version, Halo or GitHub unreachable, PowerShell blocked), including a PowerShell-independent canary.
+
 ## Testing
 
 [`docs/Testing.md`](docs/Testing.md) describes how to trigger each monitor on a test device, including a helper script that simulates event log errors, a stopped service, a stuck print job and clock drift.

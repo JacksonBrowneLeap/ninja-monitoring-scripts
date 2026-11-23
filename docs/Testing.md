@@ -15,6 +15,7 @@ Run it from a Ninja automation (PowerShell, Windows, Run As System). Replace `<a
 | Invoke-ServiceMonitor (restart works) | `-Mode ServiceDown -Service <name>`, set `monitoredservices` to it | Service restarted, closed alert logged. | `-Mode ServiceDown -Service <name> -Cleanup` |
 | Invoke-PrintQueueMonitor | `-Mode PrintQueue`, set `printqueuethreshold` to 1, wait over a minute | Spooler restarted, queue cleared, closed alert. | `-Mode PrintQueue -Cleanup` |
 | Invoke-NTPMonitor | `-Mode NtpSkew` (add `-KeepTimeService` to test a successful resync) | Drift detected, ticket opened (or resync fixes it). | `-Mode NtpSkew -Cleanup` |
+| Alerting (monitorhealth) | `-Mode HealthFail` | The Ninja Custom fields alert on `\|FAIL\|` fires. See [Alerting](Alerting.md). | `-Mode HealthFail -Cleanup` |
 | Invoke-MemoryMonitor | No script. Set `memorythreshold` to `1` | Alert ticket. Set it above current use (for example `99`) and rerun to close it. | Restore the field. |
 | Invoke-DiskMaintenance | No script. Set `DiskThreshold_C` to `99` | Cleanup runs, then a ticket if space is still low. | Restore the field. |
 | Invoke-KMSMonitor | No safe simulator. Needs a device with a genuinely unactivated Windows or Office. | n/a | n/a |

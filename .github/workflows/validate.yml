@@ -1,0 +1,48 @@
+name: Validate scripts
+
+# A syntax error on main breaks a monitor on every device at once, and the monitor cannot report
+# itself because it never starts. Catch it before merge. Uses Windows PowerShell 5.1, the real target.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every .ps1 parses under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $text = [IO.File]::ReadAllText($_.FullName, [Text.Encoding]::UTF8)
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errs)
+            foreach ($e in $errs) { Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $bad++ }
+          }
+          if ($bad) { exit 1 }
+          Write-Host "All scripts parse."
+
+      - name: Monitor conventions
+        shell: powershell
+        run: |
+          $monitors = Get-ChildItem -Filter 'Invoke-*.ps1'
+          $problems = @()
+          $health   = [IO.File]::ReadAllText('alerting/Test-MonitorHealth.ps1', [Text.Encoding]::UTF8)
+          $scripts  = [IO.File]::ReadAllText('alerting/Test-MonitorScripts.ps1', [Text.Encoding]::UTF8)
+          foreach ($m in $monitors) {
+            $t = [IO.File]::ReadAllText($m.FullName, [Text.Encoding]::UTF8)
+            if ($t -notmatch '\$MonitorName\s*=\s*''(\w+)''') { $problems += "$($m.Name): no MonitorName"; continue }
+            $name = $Matches[1]
+            if ($t -notmatch 'trap\s*\{\s*Invoke-MonitorCrash')   { $problems += "$($m.Name): missing the 'trap { Invoke-MonitorCrash }' crash guard" }
+            if ($t -notmatch '(?m)^Complete-Monitor\s*$')         { $problems += "$($m.Name): does not end with Complete-Monitor" }
+            if ($t -match '(?m)^exit\s+\d')                       { $problems += "$($m.Name): bare top-level exit (use Complete-Monitor)" }
+            if ($health -notmatch "\b$name\s*=\s*[\d.]+")         { $problems += "$($m.Name): '$name' missing from Intervals in alerting/Test-MonitorHealth.ps1" }
+            if ($scripts -notmatch [regex]::Escape($m.Name))      { $problems += "$($m.Name): missing from Files in alerting/Test-MonitorScripts.ps1" }
+          }
+          $problems | ForEach-Object { Write-Host "::error::$_" }
+          if ($problems) { exit 1 }
+          Write-Host "All $($monitors.Count) monitors follow the conventions."

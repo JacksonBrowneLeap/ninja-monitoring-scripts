@@ -37,11 +37,95 @@ function Get-NinjaConfig {
     return $Default
 }
 
-$HaloBaseUrl      = (Get-NinjaConfig "halopsaurl" "https://yourtenant.halopsa.com").TrimEnd('/')
+# -----------------------------------------------------------------------
+# MONITOR HEALTH / FAILURE REPORTING
+# Each script sets $MonitorName before loading this file. Infrastructure failures (Halo auth,
+# config, ticket calls, old PowerShell) are collected here, written to the 'monitorhealth' Ninja
+# field and reflected in the exit code by Complete-Monitor. A Ninja Custom Fields condition on
+# monitorhealth containing "|FAIL|" raises the alert.
+# -----------------------------------------------------------------------
+if ($null -eq $global:MonitorFailures) { $global:MonitorFailures = New-Object System.Collections.ArrayList }
+
+function Register-MonitorFailure {
+    param([string]$Message)
+    $clean = (($Message -replace '[\r\n"|]', ' ').Trim())
+    if ($clean.Length -gt 200) { $clean = $clean.Substring(0, 200) }
+    if ($global:MonitorFailures -notcontains $clean) { [void]$global:MonitorFailures.Add($clean) }
+    Write-Host "MONITOR FAILURE: $clean"
+}
+
+function Set-MonitorHealth {
+    # One line per monitor in the 'monitorhealth' field: Name|STATUS|UTC time|message
+    # Returns $true only when the new line was written AND read back from Ninja, else $false.
+    param([string]$Status, [string]$Message = "")
+    if (-not $MonitorName) { return $true }
+    $msg = ($Message -replace '[\r\n|]', ' ')
+    if ($msg.Length -gt 120) { $msg = $msg.Substring(0, 120) }
+    $mutex = $null; $locked = $false; $ok = $false
+    try {
+        # Several monitors share this one field and some run on the same schedule. Without a lock the
+        # read-modify-write below can lose an update (including a FAIL), so serialise it machine-wide.
+        $mutex = New-Object System.Threading.Mutex($false, 'Global\NinjaMonitorHealth')
+        try { $locked = $mutex.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $locked = $true }
+        if (-not $locked) { Write-Host "WARNING: Timed out waiting for the monitorhealth lock - writing anyway." }
+        for ($attempt = 1; ($attempt -le 3) -and (-not $ok); $attempt++) {
+            $raw   = Ninja-Property-Get monitorhealth 2>$null
+            $lines = @()
+            if ($raw) { $lines = @("$raw" -split "\r?\n" | Where-Object { $_ -and ($_ -notlike "$MonitorName|*") }) }
+            $newLine = ("{0}|{1}|{2}|{3}" -f $MonitorName, $Status, (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'), $msg)
+            $lines  += $newLine
+            [void](Ninja-Property-Set monitorhealth (($lines | Sort-Object) -join "`n") 2>$null)
+            # Read back: Ninja-Property-Set errors are not catchable, so verify the value actually stuck.
+            $check = Ninja-Property-Get monitorhealth 2>$null
+            if (@("$check" -split "\r?\n" | ForEach-Object { $_.Trim() }) -contains $newLine.Trim()) { $ok = $true }
+            elseif ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+        }
+    } catch {
+        Write-Host "WARNING: Could not update monitorhealth - $($_.Exception.Message)"
+    } finally {
+        if ($locked) { try { $mutex.ReleaseMutex() } catch {} }
+        if ($mutex)  { $mutex.Dispose() }
+    }
+    if (-not $ok) { Write-Host "WARNING: monitorhealth could not be written or verified." }
+    return [bool]$ok
+}
+
+function Complete-Monitor {
+    # Replaces a bare "exit 0" in each script: stamps health, then exits 1 if anything failed.
+    # Also called by the crash trap below, so it must be safe to call twice.
+    if ($global:MonitorCompleting) { exit 1 }
+    $global:MonitorCompleting = $true
+    $failed  = ($global:MonitorFailures.Count -gt 0)
+    $written = @(Set-MonitorHealth -Status $(if ($failed) { 'FAIL' } else { 'OK' }) -Message ($global:MonitorFailures -join '; '))[-1]
+    if (-not $written) {
+        # The health field is the alert channel, so if it is unwritable fall back to the event log
+        # (Ninja Windows Event condition, ID 907).
+        & eventcreate.exe /T ERROR /ID 907 /L APPLICATION /SO NinjaMonitor /D "${MonitorName} on ${env:COMPUTERNAME}: could not write the monitorhealth field" 2>&1 | Out-Null
+        exit 1
+    }
+    if ($failed) { exit 1 }
+    exit 0
+}
+
+# Crash guard. A trap defined here would NOT protect the monitor (Invoke-Expression gives this file
+# its own scope), so each monitor declares its own one-line trap right after loading this library:
+#     trap { Invoke-MonitorCrash $_ }
+# That records any terminating error that escapes the monitor as a FAIL, instead of the run just
+# stopping with no health line. Errors already handled by try/catch inside a monitor never reach it.
+function Invoke-MonitorCrash {
+    param($ErrorRecord)
+    $crashLine = if ($ErrorRecord -and $ErrorRecord.InvocationInfo) { $ErrorRecord.InvocationInfo.ScriptLineNumber } else { '?' }
+    Register-MonitorFailure "Unhandled error in ${MonitorName} (line $crashLine): $($ErrorRecord.Exception.Message)"
+    Complete-Monitor
+}
+
+# $HaloBaseUrlOverride (set before the script runs) replaces the Ninja field; used to test failure alerting.
+$HaloBaseUrl      = $(if ($HaloBaseUrlOverride) { $HaloBaseUrlOverride } else { Get-NinjaConfig "halopsaurl" "https://yourtenant.halopsa.com" }).TrimEnd('/')
 $HaloAuthUrl      = "$HaloBaseUrl/auth/token"
 $HaloTenant       = ([uri]$HaloBaseUrl).Host.Split('.')[0]
-$HaloClientId     = Get-NinjaConfig "halopsaclientid" ""
+$HaloClientId     = $(if ($HaloClientIdOverride) { $HaloClientIdOverride } else { Get-NinjaConfig "halopsaclientid" "" })
 try { $HaloClientSecret = Ninja-Property-Get halopsasecret 2>$null } catch { $HaloClientSecret = "" }
+if ($HaloClientSecretOverride) { $HaloClientSecret = $HaloClientSecretOverride }   # test hook: simulate a wrong API key
 $FallbackClientId = [int](Get-NinjaConfig "halopsafallbackclientid" 0)
 $FallbackSiteId   = [int](Get-NinjaConfig "halopsafallbacksiteid" 0)
 $HaloRmmFieldId   = [int](Get-NinjaConfig "halopsarmmcustomfieldid" 0)
@@ -50,6 +134,15 @@ if ($null -eq $DebugLogging) { $DebugLogging = $false }
 
 if ($FallbackClientId -le 0 -or $FallbackSiteId -le 0) {
     Write-Host "WARNING: halopsafallbackclientid / halopsafallbacksiteid are not set. Devices with no matching Halo asset will NOT get a ticket."
+}
+
+$MinPS = if ($MinPSVersionOverride) { [version]$MinPSVersionOverride } else { [version]'5.1' }   # override is a test hook
+if ($PSVersionTable.PSVersion -lt $MinPS) {
+    Register-MonitorFailure "PowerShell $($PSVersionTable.PSVersion) is older than $MinPS"
+    Complete-Monitor
+}
+if (-not $HaloClientId -or -not $HaloClientSecret -or $HaloBaseUrl -like '*yourtenant*') {
+    Register-MonitorFailure "Halo URL, client ID or secret not configured in Ninja fields"
 }
 
 # -----------------------------------------------------------------------
@@ -93,6 +186,7 @@ function Get-HaloToken {
         return $response.access_token
     } catch {
         Write-Host "WARNING: Halo auth failed - $($_.Exception.Message)"
+        Register-MonitorFailure "Halo auth failed - $($_.Exception.Message)"
         return $null
     }
 }
@@ -186,6 +280,7 @@ function Get-HaloClientSite {
         }
     } catch {
         Write-Host "WARNING: Asset lookup failed - $($_.Exception.Message). Using fallback."
+        Register-MonitorFailure "Halo asset lookup failed - $($_.Exception.Message)"
         $fallback.FallbackReason = "asset lookup failed"
     }
     return $fallback
@@ -207,6 +302,7 @@ function New-HaloTicket {
     if (-not $Token) { Write-Host "WARNING: No Halo token, skipping ticket creation."; return $null }
     if ($ClientId -le 0 -or $SiteId -le 0) {
         Write-Host "WARNING: No Halo client/site for this device (no asset match and no fallback configured) - skipping ticket creation. Set halopsafallbackclientid and halopsafallbacksiteid."
+        Register-MonitorFailure "No Halo client/site: device unmatched and no fallback configured, ticket not created"
         return $null
     }
 
@@ -264,6 +360,7 @@ function New-HaloTicket {
                 return $newId
             }
             Write-Host "WARNING: Halo ticket creation failed - $($r.Content)"
+            Register-MonitorFailure "Halo ticket creation failed - $($r.Content)"
             return $null
         } catch {
             $code      = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { $null }
@@ -275,6 +372,7 @@ function New-HaloTicket {
                 continue
             }
             Write-Host "WARNING: Halo ticket creation failed after $attempt attempt(s) (HTTP $code) - $($_.Exception.Message)"
+            Register-MonitorFailure "Halo ticket creation failed (HTTP $code) - $($_.Exception.Message)"
             Write-DebugLog "error response body: $(Get-HttpErrorBody $_)"
             return $null
         }
@@ -293,6 +391,7 @@ function Get-HaloTicketStatus {
         return $r.status_id
     } catch {
         Write-Host "WARNING: Could not query ticket #$TicketId - $($_.Exception.Message)"
+        Register-MonitorFailure "Could not query Halo ticket #$TicketId - $($_.Exception.Message)"
         return $null
     }
 }
@@ -312,9 +411,11 @@ function Close-HaloTicket {
             Write-Host "Halo ticket #$TicketId closed."
         } else {
             Write-Host "WARNING: Could not close ticket #$TicketId - $($r.Content)"
+            Register-MonitorFailure "Could not close Halo ticket #$TicketId - $($r.Content)"
         }
     } catch {
         Write-Host "WARNING: Could not close ticket #$TicketId - $($_.Exception.Message)"
+        Register-MonitorFailure "Could not close Halo ticket #$TicketId - $($_.Exception.Message)"
     }
 }
 
@@ -339,8 +440,10 @@ function Add-HaloTicketNote {
             Write-Host "Note added to Halo ticket #$TicketId"
         } else {
             Write-Host "WARNING: Could not add note to ticket #$TicketId - $($r.Content)"
+            Register-MonitorFailure "Could not add note to Halo ticket #$TicketId - $($r.Content)"
         }
     } catch {
         Write-Host "WARNING: Could not add note to ticket #$TicketId - $($_.Exception.Message)"
+        Register-MonitorFailure "Could not add note to Halo ticket #$TicketId - $($_.Exception.Message)"
     }
 }
