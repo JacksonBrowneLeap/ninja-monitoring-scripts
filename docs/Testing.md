@@ -6,7 +6,7 @@ Run it from a Ninja automation (PowerShell, Windows, Run As System). Replace `<a
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/tests/Simulate-Faults.ps1))) <args> -ThisIsATestDevice
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/tests/Simulate-Faults.ps1))) <args> -ThisIsATestDevice
 ```
 
 | Monitor | Simulate with | Expected result | Undo |

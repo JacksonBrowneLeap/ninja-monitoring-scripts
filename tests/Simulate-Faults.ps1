@@ -27,7 +27,7 @@
     (memorythreshold, DiskThreshold_C). See docs/Testing.md.
 
 .EXAMPLE
-    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/tests/Simulate-Faults.ps1))) -Mode EventLog -ThisIsATestDevice
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/tests/Simulate-Faults.ps1))) -Mode EventLog -ThisIsATestDevice
 .EXAMPLE
     ... -Mode ServiceDown -ThisIsATestDevice
 .EXAMPLE

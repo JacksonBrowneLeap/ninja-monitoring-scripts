@@ -82,7 +82,7 @@ You can still run it on its own as a **Script Result** condition (alert when exi
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/alerting/Test-MonitorHealth.ps1 | iex
+irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/alerting/Test-MonitorHealth.ps1 | iex
 ```
 
 If you remove a monitor from a device, delete its line from `monitorhealth`, or it will go stale. A new monitor must also be added to the `$Intervals` table in that script (CI checks this).
@@ -93,7 +93,7 @@ Use a test device. Run from a Ninja automation (PowerShell, Windows, System):
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/tests/Simulate-Faults.ps1))) -Mode HealthFail -ThisIsATestDevice
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/tests/Simulate-Faults.ps1))) -Mode HealthFail -ThisIsATestDevice
 ```
 
 - The **Custom fields** alert should fire within the condition's evaluation time. Clear it with the same command plus `-Cleanup`.
@@ -107,7 +107,7 @@ Every layer-1 failure can be triggered for real on a test device by setting a te
 ```powershell
 <override line from the table>
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-NTPMonitor.ps1 | iex
+irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-NTPMonitor.ps1 | iex
 ```
 
 | Failure to test | Line to add before the launcher | Expected |
