@@ -9,12 +9,18 @@ The monitors report problems on the device. This page covers the other case: the
 
 The canary also covers the cases where a monitor never gets as far as writing its health line (see "What counts as a failure" below).
 
+## Which alert to notify on
+
+A Custom fields alert (layer 1) only says the condition name matched, because Ninja does not put the field value in the message. A Windows Event alert carries the event text. So every monitor failure also writes **event 909** with the monitor, device and reason, and the readable notification comes from the Windows Event condition (IDs 901 to 909).
+
+Keep the `|FAIL|` Custom fields condition for the device health status and its automatic resolve (it clears on the next `OK` run, which an event alert cannot do), but turn **its notifications off** so one failure does not alert twice. The `monitorhealth` field is still needed: the stale-monitor check (908) reads its timestamps, and it shows each monitor's last run at a glance. The field and the event log are also independent channels: the field depends on the Ninja agent, the event on Windows.
+
 ## What counts as a failure
 
 | Situation | Caught by |
 |---|---|
-| Halo auth/API/config failure, ticket calls failing | Layer 1 (`FAIL` line, exit 1) |
-| A monitor crashes part-way (any terminating error) | Layer 1: each monitor has `trap { Invoke-MonitorCrash $_ }`, which records `FAIL` and exits 1 |
+| Halo auth/API/config failure, ticket calls failing | Layer 1 (`FAIL` line, exit 1) and event 909 |
+| A monitor crashes part-way (any terminating error) | Layer 1: each monitor has `trap { Invoke-MonitorCrash $_ }`, which records `FAIL`, writes event 909 and exits 1 |
 | A syntax error pushed to the repo (monitor never starts) | Canary 906, and the CI check blocks it before merge |
 | A monitor hangs, is killed, is not scheduled, or its automation was removed | Canary 908 (no report within max(3 x schedule, 1 hour)) |
 | The `monitorhealth` field cannot be written (field missing, wrong type, no permission) | Canary 907, raised by the monitor itself; the write is read back to prove it stuck |
@@ -56,11 +62,12 @@ The alert clears by itself on the next successful run, because each monitor over
 | 906 | A monitor or the shared library on GitHub does not parse (syntax error) |
 | 907 | A monitor could not write or verify its `monitorhealth` line (written by the monitor itself) |
 | 908 | A monitor has not reported within max(3 x its schedule, 1 hour) |
+| 909 | A monitor reported a failure (written by the monitor itself). The text names the monitor, the device and the reason, for example `Service FAIL on PC01: Halo auth failed - ...` |
 
 ### Setup in Ninja
 1. **Create the automation:** Administration, Library, Automation, Add. Language **Batch**, OS Windows, Run As **System**. Paste the contents of `alerting/Test-MonitorCanary.bat`. The canary is deliberately self-contained, so it keeps working when GitHub or PowerShell does not. When the file in the repo changes, paste the new version.
 2. **Schedule it** in your policy to run about every 15 minutes.
-3. **Add the condition:** Add condition, **Windows Event**. Log **Application**, source `NinjaMonitor`, event IDs **901 to 908**, type Error. If one condition cannot take a range, add one per ID or use a comma list. If a reset-after option is offered, set it to about an hour; the canary writes a fresh event every run while the fault persists.
+3. **Add the condition:** Add condition, **Windows Event**. Log **Application**, source `NinjaMonitor`, event IDs **901 to 909**, type Error. If one condition cannot take a range, add one per ID or use a comma list. If a reset-after option is offered, set it to about an hour; the canary writes a fresh event every run while the fault persists.
 
 906 and 908 run only when PowerShell works and GitHub is reachable (otherwise 901 to 903 already fired), and download `alerting/Test-MonitorScripts.ps1` and `alerting/Test-MonitorHealth.ps1` from GitHub each cycle. To require specific monitors on a device (so a monitor that was never deployed or was removed is flagged), set the `NM_REQUIRED` environment variable in the canary automation, for example `set "NM_REQUIRED=Service,Memory"` near the top.
 
@@ -108,7 +115,7 @@ irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts
 
 | Failure to test | Line to add before the launcher | Expected |
 |---|---|---|
-| Halo not reachable | `$HaloBaseUrlOverride = "https://halo-unreachable.invalid"` | `NTP\|FAIL\|...Halo auth failed`, exit 1 |
+| Halo not reachable | `$HaloBaseUrlOverride = "https://halo-unreachable.invalid"` | `NTP\|FAIL\|...Halo auth failed`, exit 1, and event 909 `NTP FAIL on <device>: Halo auth failed ...` |
 | API key incorrect | `$HaloClientSecretOverride = "wrong-secret"` | `NTP\|FAIL\|...Halo auth failed` (401), exit 1 |
 | Wrong client ID | `$HaloClientIdOverride = "00000000-0000-0000-0000-000000000000"` | `NTP\|FAIL\|...Halo auth failed`, exit 1 |
 | PowerShell version too old | `$MinPSVersionOverride = "99.0"` | `NTP\|FAIL\|PowerShell 5.x is older than 99.0`, exit 1 |
