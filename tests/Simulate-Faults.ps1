@@ -134,9 +134,21 @@ switch ($Mode) {
 'HealthFail' {
     # Adds (or with -Cleanup removes) a fake FAIL line in the monitorhealth field, to test the Ninja
     # "Custom fields" alert on "|FAIL|" without touching Halo or any real monitor.
+    function ConvertFrom-MonitorHealth {
+        # Parses the monitorhealth field into entries (Name, Status, Time, Message). Deliberately does NOT rely on
+        # line breaks: Ninja has been seen handing the value back with the newlines turned into spaces, which made a
+        # line-based parser treat the whole field as one line. Entries are found by their Name|OK/FAIL|UTC time| shape.
+        # Keep this copy identical in alerting/Test-MonitorHealth.ps1 and tests/Simulate-Faults.ps1 (they run standalone).
+        param([string]$Raw)
+        if (-not $Raw) { return }
+        $pattern = '(?<name>[A-Za-z0-9_.-]+)\|(?<status>OK|FAIL)\|(?<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\|(?<msg>.*?)(?=\s*[A-Za-z0-9_.-]+\|(?:OK|FAIL)\|\d{4}-\d{2}-\d{2}T|\s*$)'
+        foreach ($m in [regex]::Matches($Raw, $pattern, 'Singleline')) {
+            [pscustomobject]@{ Name = $m.Groups['name'].Value; Status = $m.Groups['status'].Value; Time = $m.Groups['time'].Value; Message = $m.Groups['msg'].Value.Trim() }
+        }
+    }
     $raw  = Ninja-Property-Get monitorhealth 2>$null
-    $keep = @()
-    if ($raw) { $keep = @("$raw" -split "\r?\n" | Where-Object { $_ -and ($_ -notlike 'SimulatedTest|*') }) }
+    $keep = @(ConvertFrom-MonitorHealth "$raw" | Where-Object { $_.Name -ne 'SimulatedTest' } |
+              ForEach-Object { "{0}|{1}|{2}|{3}" -f $_.Name, $_.Status, $_.Time, $_.Message })
     if (-not $Cleanup) {
         $keep += "SimulatedTest|FAIL|$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))|SIMULATED failure for alert testing"
     }

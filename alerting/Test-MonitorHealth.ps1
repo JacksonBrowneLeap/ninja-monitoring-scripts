@@ -43,6 +43,19 @@ if (-not (Get-Command Ninja-Property-Get -ErrorAction SilentlyContinue)) {
     }
 }
 
+function ConvertFrom-MonitorHealth {
+    # Parses the monitorhealth field into entries (Name, Status, Time, Message). Deliberately does NOT rely on
+    # line breaks: Ninja has been seen handing the value back with the newlines turned into spaces, which made a
+    # line-based parser treat the whole field as one line. Entries are found by their Name|OK/FAIL|UTC time| shape.
+    # Keep this copy identical in alerting/Test-MonitorHealth.ps1 and tests/Simulate-Faults.ps1 (they run standalone).
+    param([string]$Raw)
+    if (-not $Raw) { return }
+    $pattern = '(?<name>[A-Za-z0-9_.-]+)\|(?<status>OK|FAIL)\|(?<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\|(?<msg>.*?)(?=\s*[A-Za-z0-9_.-]+\|(?:OK|FAIL)\|\d{4}-\d{2}-\d{2}T|\s*$)'
+    foreach ($m in [regex]::Matches($Raw, $pattern, 'Singleline')) {
+        [pscustomobject]@{ Name = $m.Groups['name'].Value; Status = $m.Groups['status'].Value; Time = $m.Groups['time'].Value; Message = $m.Groups['msg'].Value.Trim() }
+    }
+}
+
 $staleOnly = ($env:NM_STALE_ONLY -eq '1')
 $required  = @()
 if ($RequiredMonitors) { $required += $RequiredMonitors }
@@ -55,19 +68,19 @@ $seen = @{}
 if (-not $raw) {
     if ($required.Count -eq 0) { Write-Output "No monitorhealth data yet."; exit 0 }
 } else {
-    foreach ($line in ("$raw" -split "\r?\n" | Where-Object { $_.Trim() })) {
-        $p = $line -split '\|', 4
-        if ($p.Count -lt 3) { continue }
-        $name   = $p[0].Trim()
-        $status = $p[1].Trim()
-        $msg    = if ($p.Count -ge 4) { $p[3] } else { '' }
+    $entries = @(ConvertFrom-MonitorHealth "$raw")
+    if ($entries.Count -eq 0) { $problems += "monitorhealth has data but no readable entries: ${raw}" }
+    foreach ($entry in $entries) {
+        $name   = $entry.Name
+        $status = $entry.Status
+        $msg    = $entry.Message
         $seen[$name] = $true
 
         if ($status -eq 'FAIL' -and -not $staleOnly) { $problems += "${name}: FAIL - $msg" }
 
         $when  = [datetime]::MinValue
         $style = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
-        if ([datetime]::TryParse($p[2], [Globalization.CultureInfo]::InvariantCulture, $style, [ref]$when)) {
+        if ([datetime]::TryParse($entry.Time, [Globalization.CultureInfo]::InvariantCulture, $style, [ref]$when)) {
             $ageH  = ((Get-Date).ToUniversalTime() - $when).TotalHours
             $every = if ($Intervals.ContainsKey($name)) { $Intervals[$name] } else { $null }
             $limit = if ($every) { [math]::Max($every * $StaleFactor, $MinStaleHours) } else { $UnknownLimitH }
@@ -75,7 +88,7 @@ if (-not $raw) {
                 $problems += ("{0}: no report for {1:N1}h (limit {2:N1}h)" -f $name, $ageH, $limit)
             }
         } else {
-            $problems += "${name}: unreadable timestamp '$($p[2])'"
+            $problems += "${name}: unreadable timestamp '$($entry.Time)'"
         }
     }
 }
