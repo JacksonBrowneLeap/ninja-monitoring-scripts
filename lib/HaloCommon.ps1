@@ -54,6 +54,19 @@ function Register-MonitorFailure {
     Write-Host "MONITOR FAILURE: $clean"
 }
 
+function ConvertFrom-MonitorHealth {
+    # Parses the monitorhealth field into entries (Name, Status, Time, Message). Deliberately does NOT rely on
+    # line breaks: Ninja has been seen handing the value back with the newlines turned into spaces, which made a
+    # line-based parser treat the whole field as one line. Entries are found by their Name|OK/FAIL|UTC time| shape.
+    # Keep this copy identical in alerting/Test-MonitorHealth.ps1 and tests/Simulate-Faults.ps1 (they run standalone).
+    param([string]$Raw)
+    if (-not $Raw) { return }
+    $pattern = '(?<name>[A-Za-z0-9_.-]+)\|(?<status>OK|FAIL)\|(?<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\|(?<msg>.*?)(?=\s*[A-Za-z0-9_.-]+\|(?:OK|FAIL)\|\d{4}-\d{2}-\d{2}T|\s*$)'
+    foreach ($m in [regex]::Matches($Raw, $pattern, 'Singleline')) {
+        [pscustomobject]@{ Name = $m.Groups['name'].Value; Status = $m.Groups['status'].Value; Time = $m.Groups['time'].Value; Message = $m.Groups['msg'].Value.Trim() }
+    }
+}
+
 function Set-MonitorHealth {
     # One line per monitor in the 'monitorhealth' field: Name|STATUS|UTC time|message
     # Returns $true only when the new line was written AND read back from Ninja, else $false.
@@ -70,14 +83,15 @@ function Set-MonitorHealth {
         if (-not $locked) { Write-Host "WARNING: Timed out waiting for the monitorhealth lock - writing anyway." }
         for ($attempt = 1; ($attempt -le 3) -and (-not $ok); $attempt++) {
             $raw   = Ninja-Property-Get monitorhealth 2>$null
-            $lines = @()
-            if ($raw) { $lines = @("$raw" -split "\r?\n" | Where-Object { $_ -and ($_ -notlike "$MonitorName|*") }) }
-            $newLine = ("{0}|{1}|{2}|{3}" -f $MonitorName, $Status, (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'), $msg)
+            $lines = @(ConvertFrom-MonitorHealth "$raw" | Where-Object { $_.Name -ne $MonitorName } |
+                       ForEach-Object { "{0}|{1}|{2}|{3}" -f $_.Name, $_.Status, $_.Time, $_.Message })
+            $stamp   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $newLine = ("{0}|{1}|{2}|{3}" -f $MonitorName, $Status, $stamp, $msg)
             $lines  += $newLine
             [void](Ninja-Property-Set monitorhealth (($lines | Sort-Object) -join "`n") 2>$null)
             # Read back: Ninja-Property-Set errors are not catchable, so verify the value actually stuck.
             $check = Ninja-Property-Get monitorhealth 2>$null
-            if (@("$check" -split "\r?\n" | ForEach-Object { $_.Trim() }) -contains $newLine.Trim()) { $ok = $true }
+            if (@(ConvertFrom-MonitorHealth "$check" | Where-Object { $_.Name -eq $MonitorName -and $_.Status -eq $Status -and $_.Time -eq $stamp }).Count -ge 1) { $ok = $true }
             elseif ($attempt -lt 3) { Start-Sleep -Seconds 2 }
         }
     } catch {
