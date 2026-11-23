@@ -17,8 +17,12 @@ Checks Windows and Office activation, attempts to activate Windows if needed, an
 6. Ticket creation retries transient failures (HTTP 5xx, 429, network errors) up to 3 times.
 
 ## Run it
+Use this launcher (TLS 1.2 first, and a failed download is reported); see [Launchers](Launchers.md).
 ```powershell
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-KMSMonitor.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-KMSMonitor.ps1 -ErrorAction Stop }
+catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("KMS on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
+iex $s
 ```
 
 ## Custom fields

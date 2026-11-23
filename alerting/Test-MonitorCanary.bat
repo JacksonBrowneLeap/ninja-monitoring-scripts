@@ -111,7 +111,7 @@ rem  so its exit code can be read; its output is made safe for the event text (l
 set "NM_STALE_ONLY=%~3"
 set "OUT=%TEMP%\nm_canary_%~1.txt"
 del "%OUT%" >nul 2>&1
-"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$f=Join-Path $env:TEMP 'nm_canary_%~1.ps1'; try { Invoke-WebRequest -UseBasicParsing -Uri '%~2' -OutFile $f -ErrorAction Stop; $o=(& '%PS_EXE%' -NoProfile -ExecutionPolicy Bypass -File $f 2>&1 | Out-String); $c=$LASTEXITCODE } catch { $o=$_.Exception.Message; $c=1 }; $o=(($o -replace '[^A-Za-z0-9 .:,;()/=_-]',' ') -replace '\s+',' ').Trim(); if ($o.Length -gt 600) { $o=$o.Substring(0,600) }; Set-Content -Path '%OUT%' -Value $o; Remove-Item $f -ErrorAction SilentlyContinue; exit $c" >nul 2>&1
+"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $f=Join-Path $env:TEMP 'nm_canary_%~1.ps1'; try { Invoke-WebRequest -UseBasicParsing -Uri '%~2' -OutFile $f -ErrorAction Stop; $o=(& '%PS_EXE%' -NoProfile -ExecutionPolicy Bypass -File $f 2>&1 | Out-String); $c=$LASTEXITCODE } catch { $o=$_.Exception.Message; $c=1 }; $o=(($o -replace '[^A-Za-z0-9 .:,;()/=_-]',' ') -replace '\s+',' ').Trim(); if ($o.Length -gt 600) { $o=$o.Substring(0,600) }; Set-Content -Path '%OUT%' -Value $o; Remove-Item $f -ErrorAction SilentlyContinue; exit $c" >nul 2>&1
 set "RC=!errorlevel!"
 if "!RC!"=="0" goto :ps_check_ok
 set "MSG="

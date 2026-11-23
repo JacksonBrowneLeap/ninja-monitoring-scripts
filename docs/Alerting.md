@@ -22,6 +22,7 @@ Keep the `|FAIL|` Custom fields condition for the device health status and its a
 | Halo auth/API/config failure, ticket calls failing | Layer 1 (`FAIL` line, exit 1) and event 909 |
 | A monitor crashes part-way (any terminating error) | Layer 1: each monitor has `trap { Invoke-MonitorCrash $_ }`, which records `FAIL`, writes event 909 and exits 1 |
 | A syntax error pushed to the repo (monitor never starts) | Canary 906, and the CI check blocks it before merge |
+| The launcher cannot download the monitor (for example TLS 1.2 is not enabled on Windows Server 2012 R2/2016) | The launcher in [Launchers](Launchers.md) writes event 905 with the reason and exits 1. A bare `irm \| iex` does not: Ninja shows SUCCESS and nothing alerts |
 | A monitor hangs, is killed, is not scheduled, or its automation was removed | Canary 908 (no report within max(3 x schedule, 1 hour)) |
 | The `monitorhealth` field cannot be written (field missing, wrong type, no permission) | Canary 907, raised by the monitor itself; the write is read back to prove it stuck |
 | Two monitors finishing at the same time | A machine-wide lock covers the read, the write and a short wait until the write is visible, so a later monitor cannot overwrite a line from a stale read |
@@ -80,6 +81,7 @@ The canary needs the `halopsaurl` System field (already set) and the Ninja agent
 You can still run it on its own as a **Script Result** condition (alert when exit code is not 0), for example hourly, which also reports `FAIL` lines:
 
 ```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/alerting/Test-MonitorHealth.ps1 | iex
 ```
 
@@ -90,6 +92,7 @@ If you remove a monitor from a device, delete its line from `monitorhealth`, or 
 Use a test device. Run from a Ninja automation (PowerShell, Windows, System):
 
 ```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/tests/Simulate-Faults.ps1))) -Mode HealthFail -ThisIsATestDevice
 ```
 
@@ -99,18 +102,12 @@ Use a test device. Run from a Ninja automation (PowerShell, Windows, System):
 
 ## Test with real failures (no fake data)
 
-Every layer-1 failure can be triggered for real on a test device by setting a test override before a monitor runs. The monitor behaves exactly as it would in production: it hits the failure, writes `FAIL` to `monitorhealth` and exits 1. Run these from a PowerShell automation (Run As System). While the `alerting` branch is unmerged, point the monitor and library at the same ref; after the merge use `main` and drop the `$HaloLibUrl` line.
-
-Common start for every layer-1 test:
+Every layer-1 failure can be triggered for real on a test device by setting a test override before a monitor runs. The monitor behaves exactly as it would in production: it hits the failure, writes `FAIL` to `monitorhealth`, writes event 909 and exits 1. Run these from a PowerShell automation (Run As System). Add ONE override line from the table, then finish with the monitor download:
 
 ```powershell
-$HaloLibUrl = "https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/alerting/lib/HaloCommon.ps1"
-```
-
-Then add ONE override line from the table, and finish with the monitor launcher:
-
-```powershell
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/alerting/Invoke-NTPMonitor.ps1 | iex
+<override line from the table>
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-NTPMonitor.ps1 | iex
 ```
 
 | Failure to test | Line to add before the launcher | Expected |

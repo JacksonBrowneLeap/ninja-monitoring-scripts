@@ -49,10 +49,13 @@ All Halo and Ninja plumbing lives in [`lib/HaloCommon.ps1`](lib/HaloCommon.ps1),
 Create an automation (PowerShell, Windows, Run As: System) containing:
 
 ```powershell
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/<ScriptName>.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/<ScriptName>.ps1 -ErrorAction Stop }
+catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("<Monitor> on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
+iex $s
 ```
 
-Replace `<ScriptName>` with one of the script names above, for example `Invoke-NTPMonitor`.
+Replace `<ScriptName>` with one of the script names above and `<Monitor>` with a short label such as `NTP`. **Ready-to-paste launchers for every monitor are in [docs/Launchers.md](docs/Launchers.md).** Do not use a bare `irm ... | iex`: on Windows Server 2012 R2 and 2016 it fails to download (TLS 1.2 is not the default), Ninja still shows SUCCESS, and nothing alerts.
 
 Your endpoint controls (application control, network filtering) must allow PowerShell to reach `raw.githubusercontent.com`.
 
