@@ -29,7 +29,7 @@
 #>
 
 # Schedule of each monitor, in hours (keys match $MonitorName in each script).
-$Intervals     = @{ Disk = 6; EventLog = 1; KMS = 24; Memory = 0.25; NTP = 24; PrintQueue = 0.5; Service = 0.25 }
+$Intervals     = @{ Disk = 6; EventLog = 0.5; KMS = 24; Memory = 0.25; NTP = 24; PrintQueue = 0.5; Service = 0.25 }
 $StaleFactor   = 3
 $MinStaleHours = 1      # was 12: a dead 15-minute monitor should not take half a day to flag
 $UnknownLimitH = 24     # for a monitor name that is not in $Intervals
