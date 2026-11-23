@@ -165,17 +165,31 @@ function Set-MonitorHealth {
     return [bool]$ok
 }
 
+function Write-MonitorEvent {
+    # Writes an Error to the Application log, source NinjaMonitor: what the Ninja Windows Event conditions watch.
+    # Unlike a Custom fields alert, a Windows Event alert carries this text into the notification, so the
+    # message here is what shows up in Teams/email. Quotes and line breaks are stripped (eventcreate argument).
+    param([int]$Id, [string]$Text)
+    $clean = (($Text -replace '[\r\n"]', ' ') -replace '\s+', ' ').Trim()
+    if ($clean.Length -gt 800) { $clean = $clean.Substring(0, 797) + '...' }
+    try { & eventcreate.exe /T ERROR /ID $Id /L APPLICATION /SO NinjaMonitor /D $clean 2>&1 | Out-Null } catch {}
+}
+
 function Complete-Monitor {
     # Replaces a bare "exit 0" in each script: stamps health, then exits 1 if anything failed.
     # Also called by the crash trap below, so it must be safe to call twice.
     if ($global:MonitorCompleting) { exit 1 }
     $global:MonitorCompleting = $true
     $failed  = ($global:MonitorFailures.Count -gt 0)
+    if ($failed) {
+        # Event 909 first (it is quick and does not depend on Ninja): names the monitor, device and reason.
+        Write-MonitorEvent 909 "${MonitorName} FAIL on ${env:COMPUTERNAME}: $($global:MonitorFailures -join '; ')"
+    }
     $written = @(Set-MonitorHealth -Status $(if ($failed) { 'FAIL' } else { 'OK' }) -Message ($global:MonitorFailures -join '; '))[-1]
     if (-not $written) {
         # The health field is the alert channel, so if it is unwritable fall back to the event log
         # (Ninja Windows Event condition, ID 907).
-        & eventcreate.exe /T ERROR /ID 907 /L APPLICATION /SO NinjaMonitor /D "${MonitorName} on ${env:COMPUTERNAME}: could not write the monitorhealth field" 2>&1 | Out-Null
+        Write-MonitorEvent 907 "${MonitorName} on ${env:COMPUTERNAME}: could not write the monitorhealth field"
         exit 1
     }
     if ($failed) { exit 1 }
