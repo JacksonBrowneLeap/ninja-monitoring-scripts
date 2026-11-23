@@ -18,7 +18,7 @@
             - Still stopped + no ticket   → new open Type 1 service ticket
 
 .NOTES
-    Version           : 1.4.0
+    Version           : 1.5.0
     Changelog         :
         1.0.0 - Initial release
         1.1.0 - Never-restart safety list (NTDS/EventLog/RpcSs); disabled-service skip;
@@ -28,6 +28,8 @@
         1.2.0 - Halo client secret moved to Ninja secure custom field (halopsasecret)
         1.3.0 - Tamper-protected services no longer attempt restart; escalate directly like never-restart services
         1.4.0 - Removed WinDefend from built-in list; disabled by design when SentinelOne is installed
+        1.5.0 - Built-in list now OS-aware: server roles/TermService skipped on workstations, Netlogon/NTDS/DFSR
+                skipped when not domain-joined, stopped non-Automatic services ignored (built-in list only)
 
     Execution Context : System (run as SYSTEM / Local Admin)
     Ninja Usage       : Policy > Scheduled Automation > Run As: System
@@ -73,6 +75,16 @@ $NeverRestart = @("NTDS", "EventLog", "RpcSs")
 # Services where Start-Service may fail due to vendor tamper protection.
 # Ticket Next Steps will flag this so technicians know not to force-restart.
 $TamperProtected = @("SentinelAgent", "WinDefend", "MpsSvc")
+
+# Built-in-list entries skipped on workstations (Windows 10/11): server roles and RDP host.
+$ServerOnlyServices = @(
+    "TermService",
+    "DNS", "NTDS", "DFSR", "DHCPServer", "W3SVC", "WAS",
+    "MSSQLSERVER", "SQLSERVERAGENT", "MSSQL`$SQLEXPRESS", "ReportServer",
+    "MSExchangeIS", "MSExchangeTransport", "MSExchangeFrontEndTransport"
+)
+# Built-in-list entries skipped when the device is not domain-joined.
+$DomainOnlyServices = @("Netlogon", "NTDS", "DFSR")
 
 # Built-in default list — used when 'monitoredservices' Ninja field is empty.
 # Services not installed on the machine are silently skipped.
@@ -158,10 +170,15 @@ function ConvertTo-TicketMapString {
 $tzName    = [System.TimeZoneInfo]::Local.DisplayName
 $timestamp = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ($tzName)"
 $osInfo    = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+$csInfo    = Get-CimInstance -ClassName Win32_ComputerSystem  -ErrorAction SilentlyContinue
+
+# ProductType: 1 = workstation, 2 = domain controller, 3 = server. Treat unknown as server (monitor everything).
+$isWorkstation = ($osInfo -and $osInfo.ProductType -eq 1)
+$isDomainJoined = ($csInfo -and $csInfo.PartOfDomain)
 
 Write-Output "=== Service Health Monitor ==="
 Write-Output "Computer  : $env:COMPUTERNAME"
-Write-Output "OS        : $($osInfo.Caption)"
+Write-Output "OS        : $($osInfo.Caption)  ($(if ($isWorkstation) { 'workstation' } else { 'server' }), $(if ($isDomainJoined) { 'domain-joined' } else { 'workgroup/Entra-joined' }))"
 Write-Output "Timestamp : $timestamp"
 Write-Output ""
 
@@ -191,6 +208,13 @@ if ($fieldServices.Count -gt 0) {
 } else {
     $serviceNames  = $BuiltInServices | Select-Object -Unique
     $usingBuiltIn  = $true
+    # Built-in list is server-oriented: drop entries that don't apply to this device type.
+    if ($isWorkstation) {
+        $serviceNames = @($serviceNames | Where-Object { $_ -notin $ServerOnlyServices })
+    }
+    if (-not $isDomainJoined) {
+        $serviceNames = @($serviceNames | Where-Object { $_ -notin $DomainOnlyServices })
+    }
     Write-Output "Service list : built-in default ($($serviceNames.Count) entries — not-installed services skipped silently)"
 }
 
@@ -242,6 +266,14 @@ foreach ($svcName in $serviceNames) {
 
     if ($svc.StartType -eq 'Disabled') {
         Write-Output "[$svcName] Startup type is Disabled — skipping (intentionally disabled by administrator)."
+        continue
+    }
+
+    # Built-in list only: a stopped Manual/trigger-start service is normal (e.g. Netlogon, TermService,
+    # Spooler on clients) — only alert on services that are meant to be always running.
+    # Services explicitly listed in the 'monitoredservices' field are always monitored.
+    if ($usingBuiltIn -and $svc.Status -eq 'Stopped' -and $svc.StartType -ne 'Automatic') {
+        Write-Output "[$svcName] Stopped but startup type is $($svc.StartType) — skipping (not expected to be always running)."
         continue
     }
 
