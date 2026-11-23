@@ -42,12 +42,32 @@
 #      field that does not exist, is not retried. It does not replace or shadow Ninja-Property-Get/Set,
 #      so the monitors' own calls behave exactly as before.
 # -----------------------------------------------------------------------
-if (-not $NoStartJitter) { Start-Sleep -Seconds (Get-Random -Minimum 0 -Maximum 40) }
+function Get-MonitorStartDelay {
+    # A fixed offset per monitor, so monitors that share a schedule boundary can never start together, plus a
+    # few random seconds. Ninja starts scripts in the same millisecond and PowerShell's default random numbers are
+    # seeded from the clock, so purely random delays can come out identical (seen on a server). The Ninja policy
+    # schedule ("Every N minutes") has no start offset, so the stagger has to live here.
+    param([string]$Name)
+    $offsets = @{ Memory = 0; Service = 25; PrintQueue = 50; EventLog = 75; Disk = 100; KMS = 125; NTP = 150 }
+    $seed = [int](([long][Environment]::TickCount + ([long]$PID * 7919)) % 2147483647)
+    $rng  = New-Object System.Random $seed
+    $base = if ($Name -and $offsets.ContainsKey($Name)) { $offsets[$Name] } else { $rng.Next(0, 60) }
+    return [int]($base + $rng.Next(0, 9))
+}
+if (-not $NoStartJitter) {
+    $startDelay = Get-MonitorStartDelay $MonitorName
+    Write-Host "Start delay: ${startDelay}s (spreads monitors that share a schedule)"
+    Start-Sleep -Seconds $startDelay
+}
+
+# Once one Ninja call has failed all its retries the agent is treated as down for the rest of this run:
+# later calls make a single attempt instead of each spending ~12s on retries.
+$global:NinjaAgentDown = $false
 
 function Invoke-NinjaCall {
     # Returns @{ Ok = $true/$false; Value = ... }. Ok is $false if the call still errored after the retries.
     param([ValidateSet('Get', 'Set')][string]$Op, [string]$Field, [string]$Value)
-    $maxAttempts = 4
+    $maxAttempts = if ($global:NinjaAgentDown) { 1 } else { 4 }
     for ($i = 1; $i -le $maxAttempts; $i++) {
         $err = $null; $out = $null; $thrown = $null
         try {
@@ -55,12 +75,13 @@ function Invoke-NinjaCall {
             else               { $out = Ninja-Property-Set $Field $Value -ErrorAction SilentlyContinue -ErrorVariable err }
         } catch { $thrown = $_ }
         $messages = @(@($err) + @($thrown) | Where-Object { $_ } | ForEach-Object { "$_" })
-        if ($messages.Count -eq 0) { return @{ Ok = $true; Value = $out } }
+        if ($messages.Count -eq 0) { $global:NinjaAgentDown = $false; return @{ Ok = $true; Value = $out } }
         $transient = @($messages | Where-Object { $_ -match 'Unable to fill operation type' }).Count -gt 0
         if ($transient -and $i -lt $maxAttempts) {
             Start-Sleep -Seconds ((2 * $i) + (Get-Random -Minimum 0 -Maximum 3))
             continue
         }
+        if ($transient) { $global:NinjaAgentDown = $true }
         return @{ Ok = $false; Value = $out }
     }
 }
@@ -108,26 +129,27 @@ function Set-MonitorHealth {
     #
     # Design notes (each one was a real failure seen on a device):
     #  - The machine-wide lock covers read-merge-write AND a short, bounded wait (about 12s) until the write is
-    #    visible on read-back. Releasing earlier lets the next monitor read a stale copy and overwrite this line
-    #    (seen in testing: a monitor confirmed OK, then its line vanished). Retries and back-off sleeps stay
-    #    OUTSIDE the lock, so one slow or failing holder cannot queue everyone else for long.
+    #    visible on read-back. Releasing earlier lets the next monitor read a stale copy and overwrite this line.
+    #    Retries and back-off sleeps stay OUTSIDE the lock, so one slow or failing holder cannot queue everyone.
     #  - Never write without the lock, and never write after a failed read: a failed read looks like an empty
     #    field and would wipe every other monitor's line.
-    #  - Reads can lag behind writes, so the read-back polls before declaring failure, and a failed attempt is
-    #    simply repeated (the merge keeps whatever is there).
-    param([string]$Status, [string]$Message = "")
+    #  - The WHOLE write has a time budget ($BudgetSec). On a server whose Ninja agent stopped answering, runs
+    #    used to take 6-12 minutes (lock waits x attempts x slow calls) and overlap their next schedule.
+    param([string]$Status, [string]$Message = "", [int]$BudgetSec = 90)
     if (-not $MonitorName) { return $true }
     $msg = ($Message -replace '[\r\n|]', ' ')
     if ($msg.Length -gt 120) { $msg = $msg.Substring(0, 120) }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
     $mutex = $null; $ok = $false
     try {
         $mutex = New-Object System.Threading.Mutex($false, 'Global\NinjaMonitorHealth')
-        for ($attempt = 1; ($attempt -le 3) -and (-not $ok); $attempt++) {
+        for ($attempt = 1; ($attempt -le 2) -and (-not $ok) -and ($clock.Elapsed.TotalSeconds -lt $BudgetSec); $attempt++) {
             $stamp   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
             $newLine = ("{0}|{1}|{2}|{3}" -f $MonitorName, $Status, $stamp, $msg)
             $locked = $false
             try {
-                try { $locked = $mutex.WaitOne(150000) } catch [System.Threading.AbandonedMutexException] { $locked = $true }
+                $waitMs = [int][math]::Max(1000, [math]::Min(30000, ($BudgetSec - $clock.Elapsed.TotalSeconds) * 1000))
+                try { $locked = $mutex.WaitOne($waitMs) } catch [System.Threading.AbandonedMutexException] { $locked = $true }
                 if (-not $locked) {
                     Write-Host "WARNING: Timed out waiting for the monitorhealth lock (attempt $attempt) - not writing without it."
                 } else {
@@ -144,6 +166,7 @@ function Set-MonitorHealth {
                         } else {
                             # Read-back, still holding the lock: Ninja-Property-Set errors are not catchable and reads can lag.
                             foreach ($pause in 1, 2, 3, 3, 3) {
+                                if ($clock.Elapsed.TotalSeconds -ge $BudgetSec) { break }
                                 Start-Sleep -Seconds $pause
                                 $check = Invoke-NinjaCall -Op Get -Field monitorhealth
                                 if ($check.Ok -and @(ConvertFrom-MonitorHealth "$($check.Value)" | Where-Object { $_.Name -eq $MonitorName -and $_.Status -eq $Status -and $_.Time -eq $stamp }).Count -ge 1) { $ok = $true; break }
@@ -154,14 +177,14 @@ function Set-MonitorHealth {
             } finally {
                 if ($locked) { try { $mutex.ReleaseMutex() } catch {} }
             }
-            if ((-not $ok) -and ($attempt -lt 3)) { Start-Sleep -Seconds (Get-Random -Minimum 2 -Maximum 8) }
+            if ((-not $ok) -and ($attempt -lt 2) -and ($clock.Elapsed.TotalSeconds -lt $BudgetSec)) { Start-Sleep -Seconds (Get-Random -Minimum 2 -Maximum 6) }
         }
     } catch {
         Write-Host "WARNING: Could not update monitorhealth - $($_.Exception.Message)"
     } finally {
         if ($mutex) { $mutex.Dispose() }
     }
-    if (-not $ok) { Write-Host "WARNING: monitorhealth could not be written or verified." }
+    if (-not $ok) { Write-Host "WARNING: monitorhealth could not be written or verified (took $([int]$clock.Elapsed.TotalSeconds)s)." }
     return [bool]$ok
 }
 
@@ -175,6 +198,24 @@ function Write-MonitorEvent {
     try { & eventcreate.exe /T ERROR /ID $Id /L APPLICATION /SO NinjaMonitor /D $clean 2>&1 | Out-Null } catch {}
 }
 
+function Update-HealthFailCount {
+    # Counts consecutive runs of THIS monitor on THIS device whose health write failed (a small file in
+    # ProgramData). One missed write is usually the Ninja agent being busy; two in a row is worth an alert.
+    # Returns the new count (0 after a success). Never throws: if the file cannot be used it returns 1.
+    param([bool]$Failed)
+    try {
+        $dir  = Join-Path $env:ProgramData 'NinjaMonitor'
+        $file = Join-Path $dir "$MonitorName.healthfail"
+        if (-not $Failed) { if (Test-Path $file) { Remove-Item $file -Force -ErrorAction SilentlyContinue }; return 0 }
+        if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $n = 0
+        if (Test-Path $file) { $raw = (Get-Content $file -ErrorAction SilentlyContinue | Select-Object -First 1); if ("$raw" -match '^\d+$') { $n = [int]$raw } }
+        $n++
+        Set-Content -Path $file -Value $n -Force
+        return $n
+    } catch { return 1 }
+}
+
 function Complete-Monitor {
     # Replaces a bare "exit 0" in each script: stamps health, then exits 1 if anything failed.
     # Also called by the crash trap below, so it must be safe to call twice.
@@ -186,11 +227,15 @@ function Complete-Monitor {
         Write-MonitorEvent 909 "${MonitorName} FAIL on ${env:COMPUTERNAME}: $($global:MonitorFailures -join '; ')"
     }
     $written = @(Set-MonitorHealth -Status $(if ($failed) { 'FAIL' } else { 'OK' }) -Message ($global:MonitorFailures -join '; '))[-1]
+    $misses  = Update-HealthFailCount (-not $written)
     if (-not $written) {
-        # The health field is the alert channel, so if it is unwritable fall back to the event log
-        # (Ninja Windows Event condition, ID 907).
-        Write-MonitorEvent 907 "${MonitorName} on ${env:COMPUTERNAME}: could not write the monitorhealth field"
-        exit 1
+        if ($misses -ge 2) {
+            # Two runs in a row could not save the health line: raise event 907 (Ninja Windows Event condition).
+            Write-MonitorEvent 907 "${MonitorName} on ${env:COMPUTERNAME}: could not write the monitorhealth field ($misses runs in a row)"
+            exit 1
+        }
+        # First miss: usually the Ninja agent being busy. Do not fail a healthy run for it.
+        Write-Host "NOTE: monitorhealth was not updated this run (miss $misses). An alert is raised if the next run also cannot write it."
     }
     if ($failed) { exit 1 }
     exit 0
