@@ -23,10 +23,10 @@ rem Exit code: 0 = all checks passed, 1 = at least one failed.
 rem ===========================================================================
 
 set "SRC=NinjaMonitor"
-if not defined GITHUB_URL set "GITHUB_URL=https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/lib/HaloCommon.ps1"
+if not defined GITHUB_URL set "GITHUB_URL=https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/lib/HaloCommon.ps1"
 if not defined PS_EXE set "PS_EXE=powershell.exe"
 if not defined MIN_PS set "MIN_PS=5.1"
-if not defined SCRIPT_BASE set "SCRIPT_BASE=https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main"
+if not defined SCRIPT_BASE set "SCRIPT_BASE=https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main"
 set "CLI=%ProgramData%\NinjaRMMAgent\ninjarmm-cli.exe"
 set "GH_OK=0"
 set "FAILS=0"

@@ -52,7 +52,7 @@
 # Shared Halo/Ninja helpers live in lib/HaloCommon.ps1 and are loaded at runtime.
 # Set $HaloLibUrl before this point to use a fork or a pinned tag instead of main.
 $MonitorName = 'KMS'
-if (-not $HaloLibUrl) { $HaloLibUrl = "https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/lib/HaloCommon.ps1" }
+if (-not $HaloLibUrl) { $HaloLibUrl = "https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/lib/HaloCommon.ps1" }
 try { Invoke-Expression (Invoke-RestMethod -Uri $HaloLibUrl -UseBasicParsing -ErrorAction Stop) }
 catch {
     $loadErr = ($_.Exception.Message -replace '[\r\n"]', ' ')

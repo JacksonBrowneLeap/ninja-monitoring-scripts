@@ -13,7 +13,7 @@ To replace a launcher: open the automation in the Ninja library, replace the scr
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-DiskMaintenance.ps1 -ErrorAction Stop }
+try { $s = irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-DiskMaintenance.ps1 -ErrorAction Stop }
 catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("Disk on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
 iex $s
 ```
@@ -22,7 +22,7 @@ iex $s
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-EventLogErrors.ps1 -ErrorAction Stop }
+try { $s = irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-EventLogErrors.ps1 -ErrorAction Stop }
 catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("EventLog on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
 iex $s
 ```
@@ -31,7 +31,7 @@ iex $s
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-KMSMonitor.ps1 -ErrorAction Stop }
+try { $s = irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-KMSMonitor.ps1 -ErrorAction Stop }
 catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("KMS on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
 iex $s
 ```
@@ -40,7 +40,7 @@ iex $s
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-MemoryMonitor.ps1 -ErrorAction Stop }
+try { $s = irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-MemoryMonitor.ps1 -ErrorAction Stop }
 catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("Memory on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
 iex $s
 ```
@@ -49,7 +49,7 @@ iex $s
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-NTPMonitor.ps1 -ErrorAction Stop }
+try { $s = irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-NTPMonitor.ps1 -ErrorAction Stop }
 catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("NTP on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
 iex $s
 ```
@@ -58,7 +58,7 @@ iex $s
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-PrintQueueMonitor.ps1 -ErrorAction Stop }
+try { $s = irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-PrintQueueMonitor.ps1 -ErrorAction Stop }
 catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("PrintQueue on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
 iex $s
 ```
@@ -67,7 +67,7 @@ iex $s
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-ServiceMonitor.ps1 -ErrorAction Stop }
+try { $s = irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-ServiceMonitor.ps1 -ErrorAction Stop }
 catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("Service on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
 iex $s
 ```
@@ -78,7 +78,7 @@ The test helpers and the stale check are also downloaded, so put the TLS line in
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/alerting/Test-MonitorHealth.ps1 | iex
+irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/alerting/Test-MonitorHealth.ps1 | iex
 ```
 
 `alerting/Test-MonitorCanary.bat` is a batch file and does not use `irm` for the monitors, but its PowerShell checks (event 906 and 908) now set TLS 1.2 before downloading.

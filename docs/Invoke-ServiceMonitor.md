@@ -28,7 +28,7 @@ For each monitored service:
 Use this launcher (TLS 1.2 first, and a failed download is reported); see [Launchers](Launchers.md).
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-ServiceMonitor.ps1 -ErrorAction Stop }
+try { $s = irm https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main/Invoke-ServiceMonitor.ps1 -ErrorAction Stop }
 catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("Service on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
 iex $s
 ```

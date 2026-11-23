@@ -14,7 +14,7 @@
 #>
 
 $Base = $env:NM_SCRIPT_BASE
-if (-not $Base) { $Base = 'https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main' }
+if (-not $Base) { $Base = 'https://raw.githubusercontent.com/leap-consult/ninja-monitoring-scripts/main' }
 $Base = $Base.TrimEnd('/')
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
