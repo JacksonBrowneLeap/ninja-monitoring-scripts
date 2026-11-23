@@ -62,6 +62,8 @@ catch {
     & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D "${MonitorName} on ${env:COMPUTERNAME}: could not load shared library - $loadErr" 2>&1 | Out-Null
     exit 1
 }
+# Any terminating error that escapes this script is recorded as a monitorhealth FAIL (see HaloCommon.ps1).
+trap { Invoke-MonitorCrash $_ }
 $HaloServiceType  = 1
 $HaloAlertType    = 21
 $HaloCategoryId   = "Monitoring & RMM>Monitoring Alert"

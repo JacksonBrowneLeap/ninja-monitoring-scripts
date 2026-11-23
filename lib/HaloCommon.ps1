@@ -56,27 +56,67 @@ function Register-MonitorFailure {
 
 function Set-MonitorHealth {
     # One line per monitor in the 'monitorhealth' field: Name|STATUS|UTC time|message
+    # Returns $true only when the new line was written AND read back from Ninja, else $false.
     param([string]$Status, [string]$Message = "")
-    if (-not $MonitorName) { return }
+    if (-not $MonitorName) { return $true }
+    $msg = ($Message -replace '[\r\n|]', ' ')
+    if ($msg.Length -gt 120) { $msg = $msg.Substring(0, 120) }
+    $mutex = $null; $locked = $false; $ok = $false
     try {
-        $raw   = Ninja-Property-Get monitorhealth 2>$null
-        $lines = @()
-        if ($raw) { $lines = @("$raw" -split "\r?\n" | Where-Object { $_ -and ($_ -notlike "$MonitorName|*") }) }
-        $msg = ($Message -replace '[\r\n|]', ' ')
-        if ($msg.Length -gt 120) { $msg = $msg.Substring(0, 120) }
-        $lines += ("{0}|{1}|{2}|{3}" -f $MonitorName, $Status, (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'), $msg)
-        Ninja-Property-Set monitorhealth (($lines | Sort-Object) -join "`n") 2>$null
+        # Several monitors share this one field and some run on the same schedule. Without a lock the
+        # read-modify-write below can lose an update (including a FAIL), so serialise it machine-wide.
+        $mutex = New-Object System.Threading.Mutex($false, 'Global\NinjaMonitorHealth')
+        try { $locked = $mutex.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $locked = $true }
+        if (-not $locked) { Write-Host "WARNING: Timed out waiting for the monitorhealth lock - writing anyway." }
+        for ($attempt = 1; ($attempt -le 3) -and (-not $ok); $attempt++) {
+            $raw   = Ninja-Property-Get monitorhealth 2>$null
+            $lines = @()
+            if ($raw) { $lines = @("$raw" -split "\r?\n" | Where-Object { $_ -and ($_ -notlike "$MonitorName|*") }) }
+            $newLine = ("{0}|{1}|{2}|{3}" -f $MonitorName, $Status, (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'), $msg)
+            $lines  += $newLine
+            [void](Ninja-Property-Set monitorhealth (($lines | Sort-Object) -join "`n") 2>$null)
+            # Read back: Ninja-Property-Set errors are not catchable, so verify the value actually stuck.
+            $check = Ninja-Property-Get monitorhealth 2>$null
+            if (@("$check" -split "\r?\n" | ForEach-Object { $_.Trim() }) -contains $newLine.Trim()) { $ok = $true }
+            elseif ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+        }
     } catch {
         Write-Host "WARNING: Could not update monitorhealth - $($_.Exception.Message)"
+    } finally {
+        if ($locked) { try { $mutex.ReleaseMutex() } catch {} }
+        if ($mutex)  { $mutex.Dispose() }
     }
+    if (-not $ok) { Write-Host "WARNING: monitorhealth could not be written or verified." }
+    return [bool]$ok
 }
 
 function Complete-Monitor {
     # Replaces a bare "exit 0" in each script: stamps health, then exits 1 if anything failed.
-    $failed = ($global:MonitorFailures.Count -gt 0)
-    Set-MonitorHealth -Status $(if ($failed) { 'FAIL' } else { 'OK' }) -Message ($global:MonitorFailures -join '; ')
+    # Also called by the crash trap below, so it must be safe to call twice.
+    if ($global:MonitorCompleting) { exit 1 }
+    $global:MonitorCompleting = $true
+    $failed  = ($global:MonitorFailures.Count -gt 0)
+    $written = @(Set-MonitorHealth -Status $(if ($failed) { 'FAIL' } else { 'OK' }) -Message ($global:MonitorFailures -join '; '))[-1]
+    if (-not $written) {
+        # The health field is the alert channel, so if it is unwritable fall back to the event log
+        # (Ninja Windows Event condition, ID 907).
+        & eventcreate.exe /T ERROR /ID 907 /L APPLICATION /SO NinjaMonitor /D "${MonitorName} on ${env:COMPUTERNAME}: could not write the monitorhealth field" 2>&1 | Out-Null
+        exit 1
+    }
     if ($failed) { exit 1 }
     exit 0
+}
+
+# Crash guard. A trap defined here would NOT protect the monitor (Invoke-Expression gives this file
+# its own scope), so each monitor declares its own one-line trap right after loading this library:
+#     trap { Invoke-MonitorCrash $_ }
+# That records any terminating error that escapes the monitor as a FAIL, instead of the run just
+# stopping with no health line. Errors already handled by try/catch inside a monitor never reach it.
+function Invoke-MonitorCrash {
+    param($ErrorRecord)
+    $crashLine = if ($ErrorRecord -and $ErrorRecord.InvocationInfo) { $ErrorRecord.InvocationInfo.ScriptLineNumber } else { '?' }
+    Register-MonitorFailure "Unhandled error in ${MonitorName} (line $crashLine): $($ErrorRecord.Exception.Message)"
+    Complete-Monitor
 }
 
 # $HaloBaseUrlOverride (set before the script runs) replaces the Ninja field; used to test failure alerting.
