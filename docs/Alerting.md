@@ -23,9 +23,9 @@ Keep the `|FAIL|` Custom fields condition for the device health status and its a
 | A monitor crashes part-way (any terminating error) | Layer 1: each monitor has `trap { Invoke-MonitorCrash $_ }`, which records `FAIL`, writes event 909 and exits 1 |
 | A syntax error pushed to the repo (monitor never starts) | Canary 906, and the CI check blocks it before merge |
 | A monitor hangs, is killed, is not scheduled, or its automation was removed | Canary 908 (no report within max(3 x schedule, 1 hour)) |
-| The `monitorhealth` field cannot be written (field missing, wrong type, no permission) | Canary 907, raised by the monitor itself; the write is read back to prove it stuck |
+| The `monitorhealth` field cannot be written (field missing, wrong type, no permission, or the Ninja agent not answering) | Event 907, raised by the monitor itself after **two runs in a row** could not write it. One missed write is usually the agent being busy and does not fail a healthy run; a monitor that goes quiet is also caught by 908 |
 | Two monitors finishing at the same time | A machine-wide lock covers the read, the write and a short wait until the write is visible, so a later monitor cannot overwrite a line from a stale read |
-| Many monitors starting in the same minute (the Ninja agent then returns "Unable to fill operation type") | Each monitor waits a random 0-40 s before starting, and the library retries that one error. A monitor never writes the field after a failed read (that would wipe the other monitors' lines) |
+| Many monitors starting in the same minute (the Ninja agent then returns "Unable to fill operation type") | Each monitor waits a fixed offset by name before doing anything (Memory 0 s, Service 25 s, PrintQueue 50 s, EventLog 75 s, Disk 100 s, KMS 125 s, NTP 150 s, plus a few random seconds), because the Ninja policy schedule has no start offset. The library retries that one error and stops retrying once the agent has clearly failed; the whole health write is capped at about 90 s. A monitor never writes the field after a failed read (that would wipe the other monitors' lines) |
 
 ## Layer 1: script health
 
@@ -60,7 +60,7 @@ The alert clears by itself on the next successful run, because each monitor over
 | 904 | Halo unreachable |
 | 905 | A monitor could not load the shared library (written by the monitor itself) |
 | 906 | A monitor or the shared library on GitHub does not parse (syntax error) |
-| 907 | A monitor could not write or verify its `monitorhealth` line (written by the monitor itself) |
+| 907 | A monitor could not write or verify its `monitorhealth` line on two runs in a row (written by the monitor itself) |
 | 908 | A monitor has not reported within max(3 x its schedule, 1 hour) |
 | 909 | A monitor reported a failure (written by the monitor itself). The text names the monitor, the device and the reason, for example `Service FAIL on PC01: Halo auth failed - ...` |
 
@@ -122,7 +122,7 @@ irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts
 | Halo URL/credentials missing | (not an override: test in a copy of the test device with the field blank, or use the API key tests) | `Halo URL, client ID or secret not configured` |
 | Library cannot load | change the `$HaloLibUrl` line to `.../lib/DoesNotExist.ps1` | Event 905 from source `NinjaMonitor`, exit 1 |
 | Monitor crashes | add `throw "test crash"` as a line after the library has loaded in a test copy of a monitor | `NTP\|FAIL\|...Unhandled error in NTP`, exit 1 |
-| `monitorhealth` cannot be written | on a test device, set the field's Automation to Read only (or rename it), then run a monitor | Event 907, exit 1 |
+| `monitorhealth` cannot be written | on a test device, set the field's Automation to Read only (or rename it), then run the same monitor **twice** | no event after the first run; event 907 and exit 1 after the second |
 
 Run the same launcher again without any override. The monitor writes `NTP|OK|...` and the alert clears.
 
