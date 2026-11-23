@@ -17,8 +17,12 @@ Reports high memory use with the top processes, and opens or closes a Halo ticke
 The ticket body lists the top processes by working set and flags any single process using more than 20% of total RAM.
 
 ## Run it
+Use this launcher (TLS 1.2 first, and a failed download is reported); see [Launchers](Launchers.md).
 ```powershell
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-MemoryMonitor.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-MemoryMonitor.ps1 -ErrorAction Stop }
+catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("Memory on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
+iex $s
 ```
 
 ## Custom fields

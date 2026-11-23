@@ -5,6 +5,7 @@ Use a **test device only**. [`tests/Simulate-Faults.ps1`](../tests/Simulate-Faul
 Run it from a Ninja automation (PowerShell, Windows, Run As System). Replace `<args>` with the arguments in the table below.
 
 ```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/tests/Simulate-Faults.ps1))) <args> -ThisIsATestDevice
 ```
 

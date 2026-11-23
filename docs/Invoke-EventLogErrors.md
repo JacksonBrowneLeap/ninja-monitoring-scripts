@@ -30,8 +30,12 @@ Within the lookback window (default 1 hour):
 Keep the schedule and `eventloglookbackhours` aligned. Hourly runs with a 1-hour lookback cover every event once.
 
 ## Run it
+Use this launcher (TLS 1.2 first, and a failed download is reported); see [Launchers](Launchers.md).
 ```powershell
-irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-EventLogErrors.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+try { $s = irm https://raw.githubusercontent.com/JacksonBrowneLeap/ninja-monitoring-scripts/main/Invoke-EventLogErrors.ps1 -ErrorAction Stop }
+catch { & eventcreate.exe /T ERROR /ID 905 /L APPLICATION /SO NinjaMonitor /D ("EventLog on ${env:COMPUTERNAME}: could not download the monitor script - " + ($_.Exception.Message -replace '[\r\n"]',' ')) | Out-Null; exit 1 }
+iex $s
 ```
 
 ## Custom fields
